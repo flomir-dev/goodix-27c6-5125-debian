@@ -75,9 +75,13 @@ make_bb010002 (guint8 data[GOODIX_BB010002_LENGTH])
 static GoodixLivePreflightEvidence
 evidence_fixture (void)
 {
+  static const guint8 app12509_identity[] = "GF_ST411SEC_APP_12509";
   GoodixLivePreflightEvidence evidence = { 0 };
 
   evidence.chip_id = 0x2504u;
+  g_strlcpy (evidence.app, "APP12509", sizeof evidence.app);
+  memcpy (evidence.identity, app12509_identity, sizeof app12509_identity);
+  evidence.identity_length = sizeof app12509_identity;
   evidence.a2_response[0] = 0x11u;
   evidence.a2_response[1] = 0x22u;
   evidence.a2_response[2] = 0x33u;
@@ -861,6 +865,118 @@ test_production_construction_generates_local_psk (void)
   remove_state_directory (directory);
 }
 
+static void
+test_app12508_pairing_activation (void)
+{
+  static const guint8 app12508_identity[] = "GF_ST411SEC_APP_12508";
+  GoodixLivePreflightEvidence evidence = evidence_fixture ();
+  GoodixPairingActivationPaths paths = { 0 };
+  GoodixPairingActivationPolicy policy = { 0 };
+  GoodixPairingActivationAudit audit;
+  GoodixSecureSessionMaterial view = { 0 };
+  g_autofree gchar *directory = new_state_directory ();
+  g_autoptr(GoodixPairingActivation) activation = NULL;
+  guint8 psk[32];
+  guint8 envelope[102];
+  guint8 validator[32];
+
+  g_strlcpy (evidence.app, "APP12508", sizeof evidence.app);
+  memset (evidence.identity, 0, sizeof evidence.identity);
+  memcpy (evidence.identity, app12508_identity, sizeof app12508_identity);
+  evidence.identity_length = sizeof app12508_identity;
+
+  fill_test_psk (psk, 0x90u);
+  g_assert_true (goodix_pairing_crypto_derive (psk, sizeof psk, envelope,
+                                               validator, NULL));
+  init_paths_policy (&paths, &policy, directory);
+  activation = goodix_pairing_activation_new_for_test (
+    &paths, &policy, &evidence, psk, &audit, NULL);
+  g_assert_nonnull (activation);
+  feed_successful_write_and_readback (activation, validator);
+  g_assert_true (goodix_pairing_activation_get_secure_view (
+    activation, &view, NULL));
+  g_assert_cmpuint (view.expected_identity_length, ==,
+                    sizeof app12508_identity);
+  g_assert_cmpmem (view.expected_identity, view.expected_identity_length,
+                   app12508_identity, sizeof app12508_identity);
+  g_assert_true (goodix_pairing_activation_mark_tls_and_promote (activation,
+                                                                 NULL));
+  g_clear_pointer (&activation, goodix_pairing_activation_free);
+  remove_state_directory (directory);
+}
+
+static void
+assert_invalid_identity_rejected (const GoodixLivePreflightEvidence *evidence)
+{
+  GoodixPairingActivationPaths paths = { 0 };
+  GoodixPairingActivationPolicy policy = { 0 };
+  GoodixPairingActivationAudit audit;
+  g_autofree gchar *directory = new_state_directory ();
+  g_autoptr(GError) error = NULL;
+  guint8 psk[32];
+  GDir *dir;
+
+  fill_test_psk (psk, 0xa0u);
+  init_paths_policy (&paths, &policy, directory);
+  g_assert_null (goodix_pairing_activation_new_for_test (
+                   &paths, &policy, evidence, psk, &audit, &error));
+  g_assert_nonnull (error);
+  g_assert_false (audit.prepared_journaled);
+  g_assert_false (audit.e0_reserved_before_submit);
+  g_assert_cmpuint (audit.persistent_write_count, ==, 0u);
+  dir = g_dir_open (directory, 0, NULL);
+  g_assert_nonnull (dir);
+  g_assert_null (g_dir_read_name (dir));
+  g_dir_close (dir);
+  remove_state_directory (directory);
+}
+
+static void
+test_invalid_or_inconsistent_identity_fails_closed (void)
+{
+  static const guint8 app12508_identity[] = "GF_ST411SEC_APP_12508";
+  static const guint8 unknown_identity[] = "GF_ST411SEC_APP_12507";
+  GoodixLivePreflightEvidence evidence;
+
+  /* Missing app must fail closed rather than falling back to APP12509. */
+  evidence = evidence_fixture ();
+  evidence.app[0] = '\0';
+  assert_invalid_identity_rejected (&evidence);
+
+  /* Missing identity_length must fail closed. */
+  evidence = evidence_fixture ();
+  evidence.identity_length = 0u;
+  assert_invalid_identity_rejected (&evidence);
+
+  /* Out-of-bounds identity_length (> sizeof evidence.identity) must fail closed. */
+  evidence = evidence_fixture ();
+  evidence.identity_length = sizeof evidence.identity + 1u;
+  assert_invalid_identity_rejected (&evidence);
+
+  /* Inconsistent app="APP12508" with APP12509 identity must fail closed. */
+  evidence = evidence_fixture ();
+  g_strlcpy (evidence.app, "APP12508", sizeof evidence.app);
+  assert_invalid_identity_rejected (&evidence);
+
+  /* Inconsistent app="APP12509" with APP12508 identity must fail closed. */
+  evidence = evidence_fixture ();
+  memcpy (evidence.identity, app12508_identity, sizeof app12508_identity);
+  evidence.identity_length = sizeof app12508_identity;
+  assert_invalid_identity_rejected (&evidence);
+
+  /* Unknown firmware revision must fail closed. */
+  evidence = evidence_fixture ();
+  g_strlcpy (evidence.app, "APP12507", sizeof evidence.app);
+  memcpy (evidence.identity, unknown_identity, sizeof unknown_identity);
+  evidence.identity_length = sizeof unknown_identity;
+  assert_invalid_identity_rejected (&evidence);
+
+  /* Missing NUL terminator in identity buffer must fail closed. */
+  evidence = evidence_fixture ();
+  evidence.identity[evidence.identity_length - 1u] = 'X';
+  assert_invalid_identity_rejected (&evidence);
+}
+
 int
 main (int argc,
       char **argv)
@@ -886,5 +1002,9 @@ main (int argc,
                    test_external_replacement_restores_linux_psk);
   g_test_add_func ("/goodix/pairing-activation/production-csprng-construction",
                    test_production_construction_generates_local_psk);
+  g_test_add_func ("/goodix/pairing-activation/app12508-pairing-activation",
+                   test_app12508_pairing_activation);
+  g_test_add_func ("/goodix/pairing-activation/invalid-or-inconsistent-identity",
+                   test_invalid_or_inconsistent_identity_fails_closed);
   return g_test_run ();
 }

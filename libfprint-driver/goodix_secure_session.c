@@ -31,6 +31,15 @@ typedef enum
 #define GOODIX_SECURE_ERROR (goodix_secure_error_quark ())
 
 static const guint8 app12509_identity[] = "GF_ST411SEC_APP_12509";
+static const guint8 app12508_identity[] = "GF_ST411SEC_APP_12508";
+
+static gboolean
+is_supported_identity (const guint8 *data, gsize len)
+{
+  return len == sizeof app12509_identity &&
+         (memcmp (data, app12509_identity, len) == 0 ||
+          memcmp (data, app12508_identity, len) == 0);
+}
 static const guint16 dac_registers[] = { 0x0220, 0x0236, 0x0238, 0x023a };
 static const guint config_dac_offsets[] = { 117, 121, 125, 129 };
 
@@ -270,9 +279,8 @@ validate_material (const GoodixSecureSessionMaterial *material,
                    GError                           **error)
 {
   if (material == NULL || material->expected_identity == NULL ||
-      material->expected_identity_length != sizeof app12509_identity ||
-      memcmp (material->expected_identity, app12509_identity,
-              sizeof app12509_identity) != 0)
+      !is_supported_identity (material->expected_identity,
+                              material->expected_identity_length))
     goto invalid_identity;
   if (material->e4_validator == NULL || material->e4_validator_length != 32 ||
       !digest_present (material->e4_validator_sha256) ||
@@ -989,8 +997,9 @@ validate_typed (GoodixSecureSession *session,
              digest_matches (body, body_length,
                              session->material.a2_response_sha256);
     case GOODIX_SECURE_PHASE_A8:
-      return body_length == sizeof app12509_identity &&
-             memcmp (body, app12509_identity, body_length) == 0;
+      return session->material.expected_identity != NULL &&
+             body_length == session->material.expected_identity_length &&
+             memcmp (body, session->material.expected_identity, body_length) == 0;
     case GOODIX_SECURE_PHASE_E4:
       {
         GoodixE4ContractResult result =

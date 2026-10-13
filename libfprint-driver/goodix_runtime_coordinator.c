@@ -30,6 +30,8 @@ struct _GoodixRuntimeCoordinator
   gpointer legacy_user_data;
   GoodixSelfState *state;
   GoodixSecureSessionMaterial secure_view;
+  guint8 identity[32];
+  gsize identity_length;
   guint8 psk[GOODIX_SELF_STATE_PSK_LENGTH];
   guint8 validator[GOODIX_SELF_STATE_DIGEST_LENGTH];
   guint8 config90[GOODIX_CONFIG90_LENGTH];
@@ -110,7 +112,7 @@ live_evidence_valid (const GoodixRuntimeCoordinatorLiveEvidence *live)
 {
   return live != NULL && live->vid == 0x27c6u && live->pid == 0x5125u &&
          live->chip_id != 0u && live->app != NULL &&
-         g_str_equal (live->app, "APP12509") &&
+         (g_str_equal (live->app, "APP12509") || g_str_equal (live->app, "APP12508")) &&
          live->a2_response != NULL && live->a2_response_length > 0u &&
          live->chip_response != NULL && live->chip_response_length > 0u &&
          live->otp != NULL && live->otp_length == GOODIX_CONFIG90_OTP_LENGTH &&
@@ -125,7 +127,10 @@ acquire_state (const GoodixRuntimeCoordinatorPaths        *paths,
                GoodixRuntimeCoordinatorAudit              *audit,
                GError                                    **error)
 {
-  static const guint8 identity[] = "GF_ST411SEC_APP_12509";
+  static const guint8 identity_12509[] = "GF_ST411SEC_APP_12509";
+  static const guint8 identity_12508[] = "GF_ST411SEC_APP_12508";
+  const guint8 *identity = NULL;
+  gsize identity_length = 0;
   GoodixRuntimeCoordinator *coordinator = NULL;
   GoodixConfig90Calibration calibration = { 0 };
   GoodixSelfStateBinding binding = { 0 };
@@ -144,6 +149,8 @@ acquire_state (const GoodixRuntimeCoordinatorPaths        *paths,
                           "state-v2 live evidence is incomplete", error);
       return NULL;
     }
+  identity = g_str_equal (live->app, "APP12508") ? identity_12508 : identity_12509;
+  identity_length = g_str_equal (live->app, "APP12508") ? sizeof identity_12508 : sizeof identity_12509;
   coordinator = g_new0 (GoodixRuntimeCoordinator, 1);
   if (!goodix_config90_derive (live->chip_id, live->otp, live->otp_length,
                                coordinator->config90, &calibration, error) ||
@@ -240,8 +247,10 @@ acquire_state (const GoodixRuntimeCoordinatorPaths        *paths,
     goto fail_closed;
   memcpy (coordinator->validator, live->live_validator,
           sizeof coordinator->validator);
-  coordinator->secure_view.expected_identity = identity;
-  coordinator->secure_view.expected_identity_length = sizeof identity;
+  memcpy (coordinator->identity, identity, identity_length);
+  coordinator->identity_length = identity_length;
+  coordinator->secure_view.expected_identity = coordinator->identity;
+  coordinator->secure_view.expected_identity_length = coordinator->identity_length;
   coordinator->secure_view.e4_validator = coordinator->validator;
   coordinator->secure_view.e4_validator_length = sizeof coordinator->validator;
   coordinator->secure_view.config90 = coordinator->config90;

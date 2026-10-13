@@ -229,7 +229,8 @@ accept_typed (GoodixLivePreflight *preflight,
               const guint8        *body,
               gsize                body_length)
 {
-  static const guint8 app[] = "GF_ST411SEC_APP_12509";
+  static const guint8 app12509[] = "GF_ST411SEC_APP_12509";
+  static const guint8 app12508[] = "GF_ST411SEC_APP_12508";
   GoodixConfig90Calibration calibration = { 0 };
   guint16 chip_id;
 
@@ -241,7 +242,23 @@ accept_typed (GoodixLivePreflight *preflight,
       memcpy (preflight->evidence.a2_response, body, body_length);
       return TRUE;
     case GOODIX_LIVE_PREFLIGHT_APP_A8:
-      if (body_length != sizeof app || memcmp (body, app, sizeof app) != 0)
+      if (body_length == sizeof app12509 &&
+          memcmp (body, app12509, sizeof app12509) == 0)
+        {
+          memcpy (preflight->evidence.identity, app12509, sizeof app12509);
+          preflight->evidence.identity_length = sizeof app12509;
+          g_strlcpy (preflight->evidence.app, "APP12509",
+                     sizeof preflight->evidence.app);
+        }
+      else if (body_length == sizeof app12508 &&
+               memcmp (body, app12508, sizeof app12508) == 0)
+        {
+          memcpy (preflight->evidence.identity, app12508, sizeof app12508);
+          preflight->evidence.identity_length = sizeof app12508;
+          g_strlcpy (preflight->evidence.app, "APP12508",
+                     sizeof preflight->evidence.app);
+        }
+      else
         return FALSE;
       if (preflight->audit != NULL)
         preflight->audit->exact_app = TRUE;

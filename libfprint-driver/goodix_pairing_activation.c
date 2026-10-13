@@ -43,6 +43,8 @@ struct _GoodixPairingActivation
   GoodixPairingProvision *provision;
   GoodixPairingActivationAudit *audit;
   GoodixSecureSessionMaterial secure_view;
+  guint8 identity[32];
+  gsize identity_length;
   guint8 psk[GOODIX_SELF_STATE_PSK_LENGTH];
   guint8 envelope[GOODIX_PAIRING_ENVELOPE_LENGTH];
   guint8 validator[GOODIX_PAIRING_VALIDATOR_LENGTH];
@@ -98,11 +100,32 @@ fail (GoodixPairingActivation      *activation,
   return FALSE;
 }
 
+static const guint8 app12509_identity[] = "GF_ST411SEC_APP_12509";
+static const guint8 app12508_identity[] = "GF_ST411SEC_APP_12508";
+
+static gboolean
+evidence_identity_valid (const GoodixLivePreflightEvidence *evidence)
+{
+  if (evidence == NULL || evidence->identity_length == 0u ||
+      evidence->identity_length > sizeof evidence->identity)
+    return FALSE;
+  if (g_str_equal (evidence->app, "APP12509"))
+    return evidence->identity_length == sizeof app12509_identity &&
+           memcmp (evidence->identity, app12509_identity,
+                   sizeof app12509_identity) == 0;
+  if (g_str_equal (evidence->app, "APP12508"))
+    return evidence->identity_length == sizeof app12508_identity &&
+           memcmp (evidence->identity, app12508_identity,
+                   sizeof app12508_identity) == 0;
+  return FALSE;
+}
+
 static gboolean
 evidence_valid (const GoodixLivePreflightEvidence *evidence)
 {
   return evidence != NULL &&
-         (evidence->chip_id == 0x2503u || evidence->chip_id == 0x2504u);
+         (evidence->chip_id == 0x2503u || evidence->chip_id == 0x2504u) &&
+         evidence_identity_valid (evidence);
 }
 
 static void
@@ -120,8 +143,11 @@ prepare_secure_view (GoodixPairingActivation        *activation,
                      const GoodixLivePreflightEvidence *evidence,
                      GError                        **error)
 {
-  static const guint8 identity[] = "GF_ST411SEC_APP_12509";
-
+  if (!evidence_identity_valid (evidence) ||
+      evidence->identity_length > sizeof activation->identity)
+    return fail (activation, GOODIX_PAIRING_ACTIVATION_ERROR_ARGUMENT,
+                 "pairing identity evidence is invalid or out of bounds",
+                 error);
   memcpy (activation->config90, evidence->config90,
           sizeof activation->config90);
   memcpy (activation->a2_response, evidence->a2_response,
@@ -129,8 +155,10 @@ prepare_secure_view (GoodixPairingActivation        *activation,
   memcpy (activation->chip_response, evidence->chip_response,
           sizeof activation->chip_response);
   memcpy (activation->otp, evidence->otp, sizeof activation->otp);
-  activation->secure_view.expected_identity = identity;
-  activation->secure_view.expected_identity_length = sizeof identity;
+  memcpy (activation->identity, evidence->identity, evidence->identity_length);
+  activation->identity_length = evidence->identity_length;
+  activation->secure_view.expected_identity = activation->identity;
+  activation->secure_view.expected_identity_length = activation->identity_length;
   activation->secure_view.e4_validator = activation->validator;
   activation->secure_view.e4_validator_length = sizeof activation->validator;
   activation->secure_view.config90 = activation->config90;
@@ -207,7 +235,7 @@ activation_new_internal (const GoodixPairingActivationPaths  *paths,
   binding.vid = 0x27c6u;
   binding.pid = 0x5125u;
   binding.chip_profile = evidence->chip_id;
-  g_strlcpy (binding.app, "APP12509", sizeof binding.app);
+  g_strlcpy (binding.app, evidence->app, sizeof binding.app);
   load_result = goodix_self_state_load (paths->state_directory, &binding,
                                         &policy->state, &loaded, error);
   if (audit != NULL)

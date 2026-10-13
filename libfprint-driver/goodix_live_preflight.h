@@ -32,6 +32,9 @@ typedef struct
   guint8 validator[32];
   guint8 config90[GOODIX_CONFIG90_LENGTH];
   GoodixConfig90Calibration calibration;
+  guint8 identity[32];
+  gsize identity_length;
+  gchar app[16];
 } GoodixLivePreflightEvidence;
 
 typedef struct
