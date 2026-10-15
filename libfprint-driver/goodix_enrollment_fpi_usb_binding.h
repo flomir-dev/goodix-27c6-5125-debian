@@ -91,6 +91,10 @@ const GoodixZeroMaskRecoveryAudit *goodix_enrollment_fpi_usb_binding_zero_audit 
  * processing. No timer, automatic retry or late release calls this API. */
 gboolean goodix_enrollment_fpi_usb_binding_request_zero_sample (
   GoodixEnrollmentFpiUsbBinding *binding, GError **error);
+#ifdef GOODIX_ENABLE_TEST_SEAMS
+GSource *goodix_enrollment_fpi_usb_binding_test_first_contact_source (
+  GoodixEnrollmentFpiUsbBinding *binding);
+#endif
 
 G_END_DECLS
 

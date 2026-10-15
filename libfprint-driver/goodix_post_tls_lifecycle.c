@@ -22,6 +22,8 @@ typedef enum
 #define GOODIX_POST_TLS_ERROR (goodix_post_tls_error_quark ())
 #define GOODIX_POST_TLS_D4_PRE_SUBMIT_PACING_MS 20u
 #define GOODIX_POST_TLS_AF_PRE_SUBMIT_PACING_MS 20u
+#define GOODIX_FIRST_CONTACT_IRQ80_LIMIT 2u
+#define GOODIX_FIRST_CONTACT_IRQ80_WAIT_MS 5000u
 
 struct _GoodixPostTlsLifecycle
 {
@@ -35,6 +37,9 @@ struct _GoodixPostTlsLifecycle
   gboolean login_gate;
   gboolean login_authorized;
   guint login_attempts;
+  guint first_contact_irq80_count;
+  gint64 first_contact_deadline;
+  GSource *first_contact_source;
   GoodixPostTlsEventFunc release_tail;
   GoodixPostTlsEventFunc finger_up;
   GoodixPostTlsTerminalFunc terminal;
@@ -81,6 +86,17 @@ clear_byte_array (GByteArray *bytes)
 }
 
 static void
+clear_first_contact_wait (GoodixPostTlsLifecycle *lifecycle)
+{
+  if (lifecycle->first_contact_source != NULL)
+    {
+      g_source_destroy (lifecycle->first_contact_source);
+      g_clear_pointer (&lifecycle->first_contact_source, g_source_unref);
+    }
+  lifecycle->first_contact_deadline = 0;
+}
+
+static void
 lifecycle_fail (GoodixPostTlsLifecycle *lifecycle,
                 GError                 *error)
 {
@@ -94,6 +110,7 @@ lifecycle_fail (GoodixPostTlsLifecycle *lifecycle,
                                  GOODIX_POST_TLS_ERROR_STATE,
                                  "post-TLS lifecycle failed");
   lifecycle->phase = GOODIX_POST_TLS_PHASE_TERMINAL;
+  clear_first_contact_wait (lifecycle);
   lifecycle->fresh_down_valid = FALSE;
   lifecycle->learned_fdt_valid = FALSE;
   memset (lifecycle->learned_fdt_table, 0,
@@ -118,6 +135,36 @@ lifecycle_fail_literal (GoodixPostTlsLifecycle *lifecycle,
 {
   lifecycle_fail (lifecycle,
                   g_error_new_literal (GOODIX_POST_TLS_ERROR, code, message));
+}
+
+static gboolean
+first_contact_timeout (gpointer data)
+{
+  GoodixPostTlsLifecycle *lifecycle = data;
+
+  /* The source belongs to this immutable-generation lifecycle. Destroy it
+   * before terminal delivery, whose owner may release the lifecycle. */
+  g_message ("GOODIX_IRQ80 path=post-tls event=reject reason=timeout count=%u",
+             lifecycle->first_contact_irq80_count);
+  lifecycle_fail (lifecycle, g_error_new_literal (
+    G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+    "Goodix first-contact IRQ0080 deadline expired"));
+  return G_SOURCE_REMOVE;
+}
+
+static void
+start_first_contact_wait (GoodixPostTlsLifecycle *lifecycle)
+{
+  lifecycle->first_contact_deadline = g_get_monotonic_time () +
+    (gint64) GOODIX_FIRST_CONTACT_IRQ80_WAIT_MS * 1000;
+  lifecycle->first_contact_source = g_timeout_source_new (
+    GOODIX_FIRST_CONTACT_IRQ80_WAIT_MS);
+  g_source_set_ready_time (lifecycle->first_contact_source,
+                           lifecycle->first_contact_deadline);
+  g_source_set_callback (lifecycle->first_contact_source,
+                         first_contact_timeout, lifecycle, NULL);
+  g_source_attach (lifecycle->first_contact_source,
+                    g_main_context_get_thread_default ());
 }
 
 static GBytes *
@@ -543,6 +590,7 @@ goodix_post_tls_lifecycle_free (GoodixPostTlsLifecycle *lifecycle)
   if (lifecycle == NULL)
     return;
   g_return_if_fail (goodix_fpi_usb_backend_is_drained (lifecycle->backend));
+  clear_first_contact_wait (lifecycle);
   if (lifecycle->audit != NULL)
     {
       lifecycle->audit->backend_drained = TRUE;
@@ -637,6 +685,13 @@ goodix_post_tls_lifecycle_handle_a0 (GoodixPostTlsLifecycle *lifecycle,
     return;
 
   phase_at_entry = lifecycle->phase;
+  /* A queued RX callback must not beat an already expired timer source. */
+  if (lifecycle->first_contact_deadline != 0 &&
+      g_get_monotonic_time () >= lifecycle->first_contact_deadline)
+    {
+      (void) first_contact_timeout (lifecycle);
+      return;
+    }
   if ((lifecycle->phase == GOODIX_POST_TLS_PHASE_FDT_NAV_1 &&
        lifecycle->ack_seen) ||
       lifecycle->phase == GOODIX_POST_TLS_PHASE_RELEASE_NAV)
@@ -833,11 +888,32 @@ goodix_post_tls_lifecycle_handle_a0 (GoodixPostTlsLifecycle *lifecycle,
             "Goodix login: contact before Verify; password required"));
           break;
         }
+      if (lifecycle->phase == GOODIX_POST_TLS_PHASE_FIRST_IRQ2 &&
+          message.control == 0x32 &&
+          event_fields (&message, &irq, &flags, &raw) &&
+          irq == 0x0080 && flags == 0u)
+        {
+          if (lifecycle->first_contact_irq80_count >= GOODIX_FIRST_CONTACT_IRQ80_LIMIT)
+            {
+              g_message ("GOODIX_IRQ80 path=post-tls event=reject reason=limit count=%u",
+                         lifecycle->first_contact_irq80_count);
+              lifecycle_fail_literal (lifecycle, GOODIX_POST_TLS_ERROR_PROTOCOL,
+                                      "Goodix first-contact IRQ0080 limit exceeded");
+              break;
+            }
+          lifecycle->first_contact_irq80_count++;
+          if (lifecycle->first_contact_irq80_count == 1u)
+            start_first_contact_wait (lifecycle);
+          g_message ("GOODIX_IRQ80 path=post-tls event=absorbed count=%u",
+                     lifecycle->first_contact_irq80_count);
+          break;
+        }
       if (message.control != 0x32 ||
           !event_fields (&message, &irq, &flags, &raw) ||
           irq != 0x0002 ||
           !goodix_fdt_irq_flags_valid (GOODIX_FDT_FLAGS_FINGER_DOWN, flags))
         goto unexpected;
+      clear_first_contact_wait (lifecycle);
       if (lifecycle->phase == GOODIX_POST_TLS_PHASE_FIRST_IRQ2)
         {
           if (!goodix_fdt_derive_up_table (
@@ -1336,6 +1412,7 @@ goodix_post_tls_lifecycle_next_login (GoodixPostTlsLifecycle *lifecycle,
       return FALSE;
     }
   lifecycle->login_attempts++;
+  lifecycle->first_contact_irq80_count = 0u;
   memcpy (lifecycle->current_fdt_table, lifecycle->fresh_down_table, 12);
   lifecycle->fresh_down_valid = FALSE;
   lifecycle->material.first_arm_timestamp = timestamp;
@@ -1345,3 +1422,20 @@ goodix_post_tls_lifecycle_next_login (GoodixPostTlsLifecycle *lifecycle,
   /* Repeat the existing single-acquisition/release graph, not initialization. */
   return submit_arm (lifecycle, FALSE, error);
 }
+
+#ifdef GOODIX_ENABLE_TEST_SEAMS
+GSource *
+goodix_post_tls_lifecycle_test_first_contact_source (GoodixPostTlsLifecycle *lifecycle)
+{
+  return lifecycle->first_contact_source;
+}
+
+void
+goodix_post_tls_lifecycle_test_expire_first_contact (GoodixPostTlsLifecycle *lifecycle)
+{
+  g_return_if_fail (lifecycle->first_contact_source != NULL);
+  lifecycle->first_contact_deadline = g_get_monotonic_time () - 1;
+  g_source_set_ready_time (lifecycle->first_contact_source,
+                           lifecycle->first_contact_deadline);
+}
+#endif

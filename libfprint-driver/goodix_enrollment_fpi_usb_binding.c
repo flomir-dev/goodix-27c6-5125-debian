@@ -24,12 +24,23 @@ struct _GoodixEnrollmentFpiUsbBinding
   GError *terminal_error;
   GoodixEnrollmentFpiUsbErrorFunc failed;
   gpointer failed_data;
+  GSource *first_contact_source;
 };
 
 static GQuark
 goodix_enrollment_usb_binding_error_quark (void)
 {
   return g_quark_from_static_string ("goodix-enrollment-fpi-usb-binding-error");
+}
+
+static void
+clear_first_contact_source (GoodixEnrollmentFpiUsbBinding *binding)
+{
+  if (binding->first_contact_source != NULL)
+    {
+      g_source_destroy (binding->first_contact_source);
+      g_clear_pointer (&binding->first_contact_source, g_source_unref);
+    }
 }
 
 static gboolean
@@ -39,10 +50,14 @@ binding_fail (GoodixEnrollmentFpiUsbBinding *binding,
 {
   if (binding != NULL && binding->terminal_error == NULL)
     {
+      clear_first_contact_source (binding);
+      goodix_enrollment_post_tls_events_clear_first_contact (binding->events);
       goodix_enrollment_post_tls_events_close_zero_window (binding->events);
-      binding->terminal_error = g_error_new_literal (
-        GOODIX_ENROLLMENT_USB_BINDING_ERROR,
-        GOODIX_ENROLLMENT_USB_BINDING_ERROR_STATE, message);
+      binding->terminal_error = error != NULL &&
+        g_error_matches (*error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) ?
+        g_error_copy (*error) : g_error_new_literal (
+          GOODIX_ENROLLMENT_USB_BINDING_ERROR,
+          GOODIX_ENROLLMENT_USB_BINDING_ERROR_STATE, message);
       binding->audit->terminal = TRUE;
     }
   if (error != NULL && *error == NULL)
@@ -52,6 +67,43 @@ binding_fail (GoodixEnrollmentFpiUsbBinding *binding,
                            GOODIX_ENROLLMENT_USB_BINDING_ERROR_ARGUMENT,
                            message);
   return FALSE;
+}
+
+static gboolean
+first_contact_timeout (gpointer data)
+{
+  GoodixEnrollmentFpiUsbBinding *binding = data;
+
+  clear_first_contact_source (binding);
+  (void) goodix_enrollment_post_tls_events_expire_first_contact (
+    binding->events, &binding->terminal_error);
+  binding->audit->terminal = TRUE;
+  goodix_enrollment_outbound_transaction_cancel (
+    binding->transaction, binding->terminal_error->message);
+  goodix_fpi_usb_backend_cancel (binding->backend);
+  /* Terminal delivery can release the owner. Do not access binding afterward. */
+  if (binding->failed != NULL)
+    binding->failed (binding->terminal_error, binding->failed_data);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+update_first_contact_source (GoodixEnrollmentFpiUsbBinding *binding)
+{
+  gint64 deadline = goodix_enrollment_post_tls_events_first_contact_deadline (
+    binding->events);
+
+  if (deadline == 0)
+    clear_first_contact_source (binding);
+  else if (binding->first_contact_source == NULL)
+    {
+      binding->first_contact_source = g_timeout_source_new (0u);
+      g_source_set_ready_time (binding->first_contact_source, deadline);
+      g_source_set_callback (binding->first_contact_source,
+                             first_contact_timeout, binding, NULL);
+      g_source_attach (binding->first_contact_source,
+                        g_main_context_get_thread_default ());
+    }
 }
 
 static gboolean
@@ -107,8 +159,13 @@ backend_out_complete (GoodixFpiUsbBackend *backend,
           "enrollment receive continuation failed");
       binding->audit->terminal = TRUE;
     }
-  if (binding->terminal_error != NULL && binding->failed != NULL)
-    binding->failed (binding->terminal_error, binding->failed_data);
+  if (binding->terminal_error != NULL)
+    {
+      clear_first_contact_source (binding);
+      goodix_enrollment_post_tls_events_clear_first_contact (binding->events);
+      if (binding->failed != NULL)
+        binding->failed (binding->terminal_error, binding->failed_data);
+    }
 }
 
 void
@@ -218,6 +275,7 @@ goodix_enrollment_fpi_usb_binding_free (GoodixEnrollmentFpiUsbBinding *binding)
   if (binding == NULL)
     return;
   g_return_if_fail (goodix_enrollment_fpi_usb_binding_can_free (binding));
+  clear_first_contact_source (binding);
   goodix_fpi_usb_backend_set_out_completed_callback (binding->backend,
                                                       NULL, NULL);
   goodix_enrollment_outbound_transaction_free (binding->transaction);
@@ -271,6 +329,8 @@ goodix_enrollment_fpi_usb_binding_cancel (
         binding->transaction))
     return;
   message = reason != NULL ? reason : "enrollment USB binding cancelled";
+  clear_first_contact_source (binding);
+  goodix_enrollment_post_tls_events_clear_first_contact (binding->events);
   goodix_enrollment_post_tls_events_close_zero_window (binding->events);
   binding->audit->cancellation_count++;
   goodix_fpi_usb_backend_cancel (binding->backend);
@@ -320,8 +380,18 @@ goodix_enrollment_fpi_usb_binding_handle_a0 (
   if (!goodix_enrollment_outbound_transaction_handle_a0 (
         binding->transaction, frame, error))
     return binding_fail (binding, "enrollment inbound A0 failed", error);
+  update_first_contact_source (binding);
   return submit_if_graph_ready (binding, error);
 }
+
+#ifdef GOODIX_ENABLE_TEST_SEAMS
+GSource *
+goodix_enrollment_fpi_usb_binding_test_first_contact_source (
+  GoodixEnrollmentFpiUsbBinding *binding)
+{
+  return binding->first_contact_source;
+}
+#endif
 
 gboolean
 goodix_enrollment_fpi_usb_binding_handle_plaintext_chunk (

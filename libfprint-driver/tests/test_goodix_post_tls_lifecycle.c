@@ -32,6 +32,8 @@ typedef struct
   guint new_owner_completion_count;
   gboolean handoff_should_fail;
   gboolean stop_before_finger;
+  gboolean stop_before_second_finger;
+  gboolean stop_before_first_arm_ack;
   const guint16 *baseline_flag_sequence;
   guint64 generation;
   uint16_t expected[GOODIX_CANONICAL_IMAGE_SAMPLE_COUNT];
@@ -593,6 +595,8 @@ run_full_trace (Fixture *fixture,
   }
   g_clear_pointer (&ack, g_bytes_unref);
   ack = build_ack (0x32);
+  if (fixture->stop_before_first_arm_ack)
+    return;
   feed_frame (fixture, ack, fragmentation);
   if (fixture->handoff_count != 0u)
     {
@@ -661,6 +665,8 @@ run_full_trace (Fixture *fixture,
   g_clear_pointer (&ack, g_bytes_unref);
   ack = build_ack (0x32);
   feed_frame (fixture, ack, fragmentation);
+  if (fixture->stop_before_second_finger)
+    return;
   g_clear_pointer (&event, g_bytes_unref);
   event = build_event (0x32, 0x0002, 0x003f, 0x0180);
   feed_frame (fixture, event, fragmentation);
@@ -1654,10 +1660,290 @@ test_login_cancel_ready (void)
   fixture_free (f);
 }
 
+static Fixture *
+irq80_wait_fixture (gboolean login)
+{
+  Fixture *f = fixture_new_for_profile (GOODIX_POST_TLS_CAPTURE_PROFILE_SINGLE_ACQUISITION);
+  if (login)
+    {
+      goodix_post_tls_lifecycle_prepare_login (f->lifecycle, login_ready_callback);
+      f->authorize_on_ready = TRUE;
+    }
+  f->stop_before_finger = TRUE;
+  run_full_trace (f, 0u);
+  g_assert_cmpint (goodix_post_tls_lifecycle_get_phase (f->lifecycle), ==,
+                   GOODIX_POST_TLS_PHASE_FIRST_IRQ2);
+  return f;
+}
+
+static void
+assert_irq80_passive (Fixture *f, guint commands)
+{
+  g_assert_cmpint (goodix_post_tls_lifecycle_get_phase (f->lifecycle), ==,
+                   GOODIX_POST_TLS_PHASE_FIRST_IRQ2);
+  g_assert_cmpuint (f->audit.command_count, ==, commands);
+  g_assert_cmpuint (f->finger_down_count, ==, 0u);
+  g_assert_cmpuint (f->finger_up_count, ==, 0u);
+  g_assert_cmpuint (f->image_count, ==, 0u);
+  g_assert_cmpuint (f->audit.first_irq0002_count, ==, 0u);
+  g_assert_cmpuint (f->audit.rearm_0x32_count, ==, 0u);
+  g_assert_cmpuint (f->terminal_count, ==, 0u);
+  g_assert_true (g_queue_is_empty (f->out));
+  g_assert_cmpuint (goodix_fpi_usb_backend_get_real_submit_count (f->backend), ==, 0u);
+  g_assert_cmpuint (f->audit.persistent_device_write_count, ==, 0u);
+}
+
+static void
+test_irq80_bounded_and_capture (gconstpointer data)
+{
+  gboolean login = GPOINTER_TO_UINT (data) != 0u;
+  g_autoptr(GMainContext) context = g_main_context_new ();
+  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
+  g_autoptr(GBytes) down = build_event (0x32, 0x0002, 0x003f, 0x0180);
+  g_autoptr(GSource) source = NULL;
+  g_main_context_push_thread_default (context);
+  Fixture *f = irq80_wait_fixture (login);
+  guint commands = f->audit.command_count;
+  gint64 before = g_get_monotonic_time ();
+  feed_frame (f, reverse, 0u);
+  gint64 after = g_get_monotonic_time ();
+  assert_irq80_passive (f, commands);
+  source = g_source_ref (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  gint64 deadline = g_source_get_ready_time (source);
+  g_assert_true (g_source_get_context (source) == context);
+  g_assert_cmpint (deadline, >=, before + 5000000);
+  g_assert_cmpint (deadline, <=, after + 5000000);
+  feed_frame (f, reverse, 0u);
+  assert_irq80_passive (f, commands);
+  g_assert_true (source == goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  g_assert_cmpint (g_source_get_ready_time (source), ==, deadline);
+  feed_frame (f, down, 0u);
+  g_assert_cmpint (goodix_post_tls_lifecycle_get_phase (f->lifecycle), ==,
+                   GOODIX_POST_TLS_PHASE_FIRST_22);
+  g_assert_cmpuint (f->audit.command_count, ==, commands + 1u);
+  g_assert_cmpuint (f->finger_down_count, ==, 1u);
+  g_assert_true (g_source_is_destroyed (source));
+  g_assert_null (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  const guint8 body[] = { 1, 0 };
+  complete_command (f, 0x22, body, sizeof body);
+  g_autoptr(GBytes) ack22 = build_ack (0x22);
+  feed_frame (f, ack22, 0u);
+  g_autoptr(GBytes) image = build_image (f);
+  goodix_post_tls_lifecycle_handle_plaintext (f->lifecycle, image);
+  g_assert_cmpuint (f->image_count, ==, 1u);
+  g_assert_cmpuint (f->terminal_count, ==, 0u);
+  g_assert_false (g_main_context_iteration (context, FALSE));
+  fixture_free (f);
+  g_main_context_pop_thread_default (context);
+}
+
+static void
+test_irq80_limit (void)
+{
+  Fixture *f = irq80_wait_fixture (FALSE);
+  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
+  guint commands = f->audit.command_count;
+  feed_frame (f, reverse, 0u);
+  feed_frame (f, reverse, 0u);
+  g_autoptr(GSource) source = g_source_ref (
+    goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  feed_frame (f, reverse, 0u);
+  g_assert_cmpuint (f->terminal_count, ==, 1u);
+  g_assert_nonnull (strstr (goodix_post_tls_lifecycle_get_error (f->lifecycle)->message, "limit exceeded"));
+  g_assert_true (g_source_is_destroyed (source));
+  g_assert_true (goodix_fpi_usb_backend_is_drained (f->backend));
+  g_assert_cmpuint (f->audit.command_count, ==, commands);
+  g_assert_cmpuint (f->finger_down_count, ==, 0u);
+  /* Late application delivery must not request another fenced USB receive. */
+  goodix_post_tls_lifecycle_handle_a0 (f->lifecycle, reverse);
+  g_assert_cmpuint (f->terminal_count, ==, 1u);
+  fixture_free (f);
+}
+
+static void
+test_irq80_expiry_and_teardown (gconstpointer data)
+{
+  const gchar *mode = data;
+  g_autoptr(GMainContext) context = g_main_context_new ();
+  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
+  g_autoptr(GSource) source = NULL;
+  g_main_context_push_thread_default (context);
+  Fixture *f = irq80_wait_fixture (FALSE);
+  guint commands = f->audit.command_count;
+  feed_frame (f, reverse, 0u);
+  source = g_source_ref (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  goodix_post_tls_lifecycle_test_expire_first_contact (f->lifecycle);
+  if (g_str_equal (mode, "silence"))
+    {
+      g_autoptr(GError) error = NULL;
+      g_assert_true (goodix_fpi_usb_backend_arm_receive (f->backend, f->generation, &error));
+      g_assert_true (g_main_context_iteration (context, FALSE));
+      g_assert_error (goodix_post_tls_lifecycle_get_error (f->lifecycle), G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+      g_assert_cmpuint (goodix_fpi_usb_backend_get_outstanding (f->backend), ==, 1u);
+      goodix_fpi_usb_backend_complete_receive (f->backend, f->generation, NULL, 0u, NULL);
+      g_assert_true (goodix_fpi_usb_backend_is_drained (f->backend));
+      goodix_post_tls_lifecycle_cancel (f->lifecycle, "cancel after timeout");
+    }
+  else if (g_str_equal (mode, "late-irq2"))
+    {
+      g_autoptr(GBytes) down = build_event (0x32, 0x0002, 0x003f, 0x0180);
+      feed_frame (f, down, 0u);
+      g_assert_error (goodix_post_tls_lifecycle_get_error (f->lifecycle), G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+    }
+  else if (g_str_equal (mode, "free"))
+    {
+      goodix_post_tls_lifecycle_free (f->lifecycle);
+      f->lifecycle = NULL;
+    }
+  else
+    {
+      goodix_post_tls_lifecycle_cancel (f->lifecycle, "cancel before ready source dispatch");
+      if (g_str_equal (mode, "generation"))
+        {
+          goodix_post_tls_lifecycle_free (f->lifecycle);
+          f->generation++;
+          g_autoptr(GCancellable) cancellable = g_cancellable_new ();
+          g_assert_true (goodix_fpi_usb_backend_begin_generation (f->backend, f->generation, cancellable, NULL));
+          goodix_usb_router_begin_generation (f->router, f->generation);
+          f->lifecycle = goodix_post_tls_lifecycle_new (
+            f->backend, f->generation, &f->material, image_callback,
+            finger_down_callback, release_tail_callback, finger_up_callback,
+            terminal_callback, f, NULL, NULL);
+          g_assert_nonnull (f->lifecycle);
+        }
+    }
+  g_assert_true (g_source_is_destroyed (source));
+  g_assert_false (g_main_context_iteration (context, FALSE));
+  g_assert_cmpuint (f->terminal_count, ==, g_str_equal (mode, "free") ? 0u : 1u);
+  g_assert_cmpuint (f->finger_down_count, ==, 0u);
+  g_assert_cmpuint (f->image_count, ==, 0u);
+  g_assert_cmpuint (f->audit.command_count, ==, commands);
+  if (g_str_equal (mode, "generation"))
+    g_assert_cmpint (goodix_post_tls_lifecycle_get_phase (f->lifecycle), ==, GOODIX_POST_TLS_PHASE_NOT_STARTED);
+  fixture_free (f);
+  g_main_context_pop_thread_default (context);
+}
+
+static void
+test_irq80_negative (gconstpointer data)
+{
+  const gchar *mode = data;
+  Fixture *f = irq80_wait_fixture (FALSE);
+  guint8 body[17] = { 0x80, 0, 0, 0 };
+  guint8 control = 0x32;
+  gsize length = 16u;
+  if (g_str_equal (mode, "flags")) body[2] = 1u;
+  if (g_str_equal (mode, "irq-bits")) body[0] = 0x82;
+  if (g_str_equal (mode, "control")) control = 0x34;
+  if (g_str_equal (mode, "short")) length = 15u;
+  if (g_str_equal (mode, "long")) length = 17u;
+  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
+  feed_frame (f, reverse, 0u);
+  g_autoptr(GSource) source = g_source_ref (
+    goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  g_autoptr(GBytes) invalid = build_response (control, body, length);
+  if (g_str_equal (mode, "checksum"))
+    {
+      gsize size;
+      const guint8 *bytes = g_bytes_get_data (invalid, &size);
+      guint8 *copy = g_memdup2 (bytes, size);
+      copy[size - 1u] ^= 1u;
+      g_clear_pointer (&invalid, g_bytes_unref);
+      invalid = g_bytes_new_take (copy, size);
+    }
+  feed_frame (f, invalid, 0u);
+  g_assert_cmpuint (f->terminal_count, ==, 1u);
+  g_assert_true (g_source_is_destroyed (source));
+  g_assert_cmpuint (f->image_count, ==, 0u);
+  g_assert_cmpuint (f->finger_down_count, ==, 0u);
+  g_assert_true (g_queue_is_empty (f->out));
+  fixture_free (f);
+}
+
+static void
+test_irq80_wrong_phase (gconstpointer data)
+{
+  guint phase = GPOINTER_TO_UINT (data);
+  Fixture *f = fixture_new ();
+  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
+  if (phase == 0u)
+    {
+      g_assert_true (goodix_post_tls_lifecycle_start (f->lifecycle, NULL));
+    }
+  else
+    {
+      f->stop_before_first_arm_ack = phase == 1u;
+      f->stop_before_second_finger = phase == 2u;
+      f->stop_before_finger = phase == 3u;
+      run_full_trace (f, 0u);
+      if (phase == 3u)
+        {
+          g_autoptr(GBytes) down = build_event (0x32, 0x0002, 0x003f, 0x0180);
+          feed_frame (f, down, 0u);
+          const guint8 body[] = { 1, 0 };
+          complete_command (f, 0x22, body, sizeof body);
+          g_autoptr(GBytes) ack22 = build_ack (0x22);
+          feed_frame (f, ack22, 0u);
+          g_autoptr(GBytes) image = build_image (f);
+          goodix_post_tls_lifecycle_handle_plaintext (f->lifecycle, image);
+        }
+    }
+  guint images = f->image_count;
+  guint commands = f->audit.command_count;
+  feed_frame (f, reverse, 0u);
+  g_assert_cmpuint (f->terminal_count, ==, 1u);
+  g_assert_cmpuint (f->image_count, ==, images);
+  g_assert_cmpuint (f->audit.command_count, ==, commands);
+  g_assert_null (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  fixture_free (f);
+}
+
+static void
+test_irq80_unauthorized_and_ordinary_wait (void)
+{
+  Fixture *f = irq80_wait_fixture (FALSE);
+  g_assert_null (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  goodix_post_tls_lifecycle_timeout (f->lifecycle);
+  assert_irq80_passive (f, f->audit.command_count);
+  fixture_free (f);
+  f = fixture_new_for_profile (GOODIX_POST_TLS_CAPTURE_PROFILE_SINGLE_ACQUISITION);
+  goodix_post_tls_lifecycle_prepare_login (f->lifecycle, login_ready_callback);
+  f->stop_before_finger = TRUE;
+  run_full_trace (f, 0u);
+  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
+  feed_frame (f, reverse, 0u);
+  g_assert_error (goodix_post_tls_lifecycle_get_error (f->lifecycle), G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_assert_null (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  g_assert_cmpuint (f->finger_down_count, ==, 0u);
+  g_assert_cmpuint (f->terminal_count, ==, 1u);
+  fixture_free (f);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_data_func ("/irq80/capture", GUINT_TO_POINTER (0u), test_irq80_bounded_and_capture);
+  g_test_add_data_func ("/irq80/login-capture", GUINT_TO_POINTER (1u), test_irq80_bounded_and_capture);
+  g_test_add_func ("/irq80/third-limit", test_irq80_limit);
+  g_test_add_func ("/irq80/unauthorized-and-ordinary-wait", test_irq80_unauthorized_and_ordinary_wait);
+  const gchar *teardown[] = { "silence", "late-irq2", "cancel", "free", "generation" };
+  for (guint i = 0u; i < G_N_ELEMENTS (teardown); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/irq80/teardown/%s", teardown[i]);
+      g_test_add_data_func (path, teardown[i], test_irq80_expiry_and_teardown);
+    }
+  const gchar *negative[] = { "flags", "irq-bits", "control", "short", "long", "checksum" };
+  for (guint i = 0u; i < G_N_ELEMENTS (negative); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/irq80/reject/%s", negative[i]);
+      g_test_add_data_func (path, negative[i], test_irq80_negative);
+    }
+  for (guint i = 0u; i < 4u; i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/irq80/wrong-phase/%u", i);
+      g_test_add_data_func (path, GUINT_TO_POINTER (i), test_irq80_wrong_phase);
+    }
   g_test_add_func ("/login/three-physical-attempts", test_login_three_physical_attempts);
   g_test_add_func ("/login/ready-same-session-handoff", test_login_ready_handoff);
   g_test_add_func ("/login/early-contact-no-22", test_login_early_contact);
