@@ -30,6 +30,13 @@ typedef struct
 GoodixEnrollmentFdtState *goodix_enrollment_fdt_state_new (
   GoodixEnrollmentFdtStateAudit *audit);
 void goodix_enrollment_fdt_state_free (GoodixEnrollmentFdtState *state);
+/* Refresh only the active DOWN table while IRQ2 is still pending. Stage and
+ * release provenance remain unchanged; output is assigned after validation. */
+gboolean goodix_enrollment_fdt_state_refresh_irq80 (
+  GoodixEnrollmentFdtState *state,
+  const guint8 raw[GOODIX_ENROLLMENT_FDT_TABLE_LENGTH],
+  guint8 table[GOODIX_ENROLLMENT_FDT_TABLE_LENGTH],
+  GError **error);
 
 gboolean goodix_enrollment_fdt_state_observe_irq2 (
   GoodixEnrollmentFdtState *state,

@@ -41,6 +41,18 @@ typedef struct
   guint8 expected_down[12];
 } Fixture;
 
+static guint timestamp_calls;
+static guint16 timestamp_value;
+
+static guint16
+next_timestamp (void)
+{
+  timestamp_calls++;
+  return ++timestamp_value;
+}
+
+static guint16 (*timestamp_provider) (void) = next_timestamp;
+
 static void
 submission_free (Submission *submission)
 {
@@ -213,6 +225,9 @@ fixture_new_for_profile_and_seed (GoodixPostTlsCaptureProfile capture_profile,
   fixture->material.af_timestamp = 0x1234;
   fixture->material.first_arm_timestamp = 0x2345;
   fixture->material.second_arm_timestamp = 0x3456;
+  timestamp_calls = 0u;
+  timestamp_value = 0x4566u;
+  fixture->material.next_timestamp = timestamp_provider;
   fixture->material.capture_profile = capture_profile;
   for (gsize i = 0; i < GOODIX_CANONICAL_IMAGE_SAMPLE_COUNT; i++)
     fixture->expected[i] = (uint16_t) (i & 0x0fffu);
@@ -1703,25 +1718,59 @@ assert_no_contact_sources (GMainContext *context)
 }
 
 static void
+rearm_irq80 (Fixture *f, guint16 base)
+{
+  guint8 expected[16] = { 0x08, 0x01 };
+  guint commands = f->audit.command_count;
+  guint calls = timestamp_calls;
+  guint ready = f->login_ready_count;
+  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, base);
+  g_autoptr(GBytes) ack = build_ack (0x32);
+
+  feed_frame (f, reverse, 0u);
+  g_assert_cmpint (goodix_post_tls_lifecycle_get_phase (f->lifecycle), ==,
+                   GOODIX_POST_TLS_PHASE_FIRST_ARM);
+  g_assert_cmpuint (f->audit.command_count, ==, commands + 1u);
+  g_assert_cmpuint (timestamp_calls, ==, calls + 1u);
+  g_assert_cmpuint (goodix_fpi_usb_backend_get_out_outstanding (f->backend), ==, 1u);
+  g_assert_cmpuint (f->finger_down_count, ==, 0u);
+  g_assert_cmpuint (f->image_count, ==, 0u);
+  for (guint i = 0u; i < 6u; i++)
+    {
+      expected[2u + 2u * i] = 0x80;
+      expected[3u + 2u * i] = (guint8) (((base + 2u * i) >> 1) & 0xffu);
+    }
+  expected[14] = (guint8) timestamp_value;
+  expected[15] = (guint8) (timestamp_value >> 8);
+  complete_command (f, 0x32, expected, sizeof expected);
+  /* A completed OUT alone cannot advance past the ACK gate. */
+  g_assert_cmpint (goodix_post_tls_lifecycle_get_phase (f->lifecycle), ==,
+                   GOODIX_POST_TLS_PHASE_FIRST_ARM);
+  feed_frame (f, ack, 0u);
+  g_assert_cmpuint (f->login_ready_count, ==, ready);
+  g_assert_cmpuint (f->handoff_count, ==, 0u);
+  assert_irq80_passive (f, commands + 1u);
+}
+
+static void
 test_irq80_bounded_and_capture (gconstpointer data)
 {
   gboolean login = GPOINTER_TO_UINT (data) != 0u;
   g_autoptr(GMainContext) context = g_main_context_new ();
-  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
   g_autoptr(GBytes) down = build_event (0x32, 0x0002, 0x003f, 0x0180);
   g_main_context_push_thread_default (context);
   Fixture *f = irq80_wait_fixture (login);
   guint commands = f->audit.command_count;
-  feed_frame (f, reverse, 0u);
-  assert_irq80_passive (f, commands);
+  rearm_irq80 (f, 0x8202u);
+  assert_irq80_passive (f, commands + 1u);
   assert_no_contact_sources (context);
-  feed_frame (f, reverse, 0u);
-  assert_irq80_passive (f, commands);
+  rearm_irq80 (f, 0x0140u);
+  assert_irq80_passive (f, commands + 2u);
   assert_no_contact_sources (context);
   feed_frame (f, down, 0u);
   g_assert_cmpint (goodix_post_tls_lifecycle_get_phase (f->lifecycle), ==,
                    GOODIX_POST_TLS_PHASE_FIRST_22);
-  g_assert_cmpuint (f->audit.command_count, ==, commands + 1u);
+  g_assert_cmpuint (f->audit.command_count, ==, commands + 3u);
   g_assert_cmpuint (f->finger_down_count, ==, 1u);
   assert_no_contact_sources (context);
   const guint8 body[] = { 1, 0 };
@@ -1743,13 +1792,13 @@ test_irq80_limit (void)
   Fixture *f = irq80_wait_fixture (FALSE);
   g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
   guint commands = f->audit.command_count;
-  feed_frame (f, reverse, 0u);
-  feed_frame (f, reverse, 0u);
+  rearm_irq80 (f, 0x0180u);
+  rearm_irq80 (f, 0x0140u);
   feed_frame (f, reverse, 0u);
   g_assert_cmpuint (f->terminal_count, ==, 1u);
   g_assert_nonnull (strstr (goodix_post_tls_lifecycle_get_error (f->lifecycle)->message, "limit exceeded"));
   g_assert_true (goodix_fpi_usb_backend_is_drained (f->backend));
-  g_assert_cmpuint (f->audit.command_count, ==, commands);
+  g_assert_cmpuint (f->audit.command_count, ==, commands + 2u);
   g_assert_cmpuint (f->finger_down_count, ==, 0u);
   /* Late application delivery must not request another fenced USB receive. */
   goodix_post_tls_lifecycle_handle_a0 (f->lifecycle, reverse);
@@ -1762,11 +1811,11 @@ test_irq80_teardown (gconstpointer data)
 {
   const gchar *mode = data;
   g_autoptr(GMainContext) context = g_main_context_new ();
-  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
   g_main_context_push_thread_default (context);
   Fixture *f = irq80_wait_fixture (FALSE);
   guint commands = f->audit.command_count;
-  feed_frame (f, reverse, 0u);
+  rearm_irq80 (f, 0x0180u);
+  commands++;
   assert_no_contact_sources (context);
   if (g_str_equal (mode, "cancel"))
     {
@@ -1821,13 +1870,17 @@ test_irq80_negative (gconstpointer data)
   guint8 body[17] = { 0x80, 0, 0, 0 };
   guint8 control = 0x32;
   gsize length = 16u;
+  for (guint i = 0u; i < 6u; i++)
+    {
+      body[4u + i * 2u] = 0x80;
+      body[5u + i * 2u] = 1u;
+    }
   if (g_str_equal (mode, "flags")) body[2] = 1u;
   if (g_str_equal (mode, "irq-bits")) body[0] = 0x82;
   if (g_str_equal (mode, "control")) control = 0x34;
   if (g_str_equal (mode, "short")) length = 15u;
   if (g_str_equal (mode, "long")) length = 17u;
-  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
-  feed_frame (f, reverse, 0u);
+  rearm_irq80 (f, 0x0180u);
   g_autoptr(GBytes) invalid = build_response (control, body, length);
   if (g_str_equal (mode, "checksum"))
     {
@@ -1907,6 +1960,125 @@ test_irq80_unauthorized_and_ordinary_wait (void)
   g_main_context_pop_thread_default (context);
 }
 
+static void
+test_irq80_invalid_raw (gconstpointer data)
+{
+  guint16 bad_word = (guint16) GPOINTER_TO_UINT (data);
+  guint8 body[16] = { 0x80, 0, 0, 0 };
+  Fixture *f = irq80_wait_fixture (FALSE);
+  guint commands = f->audit.command_count;
+
+  for (guint i = 0u; i < 6u; i++)
+    {
+      body[4u + i * 2u] = 0x80;
+      body[5u + i * 2u] = 1u;
+    }
+  /* The final channel fails after five temporary entries were derived. */
+  body[14] = (guint8) bad_word;
+  body[15] = (guint8) (bad_word >> 8);
+  g_autoptr(GBytes) invalid = build_response (0x32, body, sizeof body);
+  feed_frame (f, invalid, 0u);
+  g_assert_cmpuint (f->terminal_count, ==, 1u);
+  g_assert_cmpuint (f->audit.command_count, ==, commands);
+  g_assert_cmpuint (timestamp_calls, ==, 0u);
+  g_assert_cmpuint (f->finger_down_count, ==, 0u);
+  g_assert_true (g_queue_is_empty (f->out));
+  g_assert_true (goodix_fpi_usb_backend_is_drained (f->backend));
+  fixture_free (f);
+}
+
+static void
+test_irq80_missing_timestamp (void)
+{
+  timestamp_provider = NULL;
+  Fixture *f = irq80_wait_fixture (FALSE);
+  timestamp_provider = next_timestamp;
+  guint commands = f->audit.command_count;
+  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
+  feed_frame (f, reverse, 0u);
+  g_assert_cmpuint (f->terminal_count, ==, 1u);
+  g_assert_cmpuint (timestamp_calls, ==, 0u);
+  g_assert_cmpuint (f->audit.command_count, ==, commands);
+  g_assert_true (g_queue_is_empty (f->out));
+  fixture_free (f);
+}
+
+static void
+test_irq80_rearm_failure (gconstpointer data)
+{
+  const gchar *mode = data;
+  g_autoptr(GMainContext) context = g_main_context_new ();
+  g_main_context_push_thread_default (context);
+  Fixture *f = irq80_wait_fixture (FALSE);
+  guint commands = f->audit.command_count;
+  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
+  feed_frame (f, reverse, 0u);
+  g_assert_cmpuint (g_queue_get_length (f->out), ==, 1u);
+
+  if (g_str_equal (mode, "early-ack"))
+    {
+      g_autoptr(GBytes) ack = build_ack (0x32);
+      feed_frame (f, ack, 0u);
+    }
+  else if (g_str_equal (mode, "early-irq80"))
+    feed_frame (f, reverse, 0u);
+  else if (g_str_equal (mode, "cancel-pending"))
+    goodix_post_tls_lifecycle_cancel (f->lifecycle, "cancel pending IRQ0080 OUT");
+  else if (g_str_equal (mode, "stale-completion"))
+    {
+      goodix_fpi_usb_backend_complete_out (f->backend, f->generation + 1u, NULL);
+      g_assert_cmpuint (goodix_fpi_usb_backend_get_out_outstanding (f->backend), ==, 1u);
+      g_assert_cmpint (goodix_post_tls_lifecycle_get_phase (f->lifecycle), ==,
+                       GOODIX_POST_TLS_PHASE_FIRST_ARM);
+      goodix_post_tls_lifecycle_cancel (f->lifecycle, "cancel after stale completion");
+    }
+  else if (g_str_equal (mode, "out-error"))
+    {
+      g_autoptr(GError) error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                                    "synthetic IRQ0080 OUT error");
+      goodix_fpi_usb_backend_complete_out (f->backend, f->generation, error);
+    }
+  else
+    {
+      complete_command (f, 0x32, NULL, 0u);
+      g_assert_cmpint (goodix_post_tls_lifecycle_get_phase (f->lifecycle), ==,
+                       GOODIX_POST_TLS_PHASE_FIRST_ARM);
+      if (g_str_equal (mode, "wrong-ack"))
+        {
+          g_autoptr(GBytes) ack = build_ack (0x34);
+          feed_frame (f, ack, 0u);
+        }
+      else if (g_str_equal (mode, "early-irq2"))
+        {
+          g_autoptr(GBytes) down = build_event (0x32, 0x0002, 0x003f, 0x0180);
+          feed_frame (f, down, 0u);
+        }
+      else
+        {
+          g_assert_true (g_str_equal (mode, "missing-ack"));
+          assert_no_contact_sources (context);
+          g_assert_true (goodix_post_tls_lifecycle_needs_receive (f->lifecycle));
+          goodix_post_tls_lifecycle_cancel (f->lifecycle, "cancel missing ACK32");
+        }
+    }
+  /* The original pending completion may still drain after terminal delivery. */
+  if (goodix_fpi_usb_backend_get_out_outstanding (f->backend) != 0u)
+    goodix_fpi_usb_backend_complete_out (f->backend, f->generation, NULL);
+  while (!g_queue_is_empty (f->out))
+    submission_free (g_queue_pop_head (f->out));
+  goodix_post_tls_lifecycle_handle_a0 (f->lifecycle, reverse);
+  g_assert_cmpuint (f->terminal_count, ==, 1u);
+  g_assert_cmpuint (f->audit.command_count, ==, commands + 1u);
+  g_assert_cmpuint (timestamp_calls, ==, 1u);
+  g_assert_cmpuint (f->finger_down_count, ==, 0u);
+  g_assert_cmpuint (f->image_count, ==, 0u);
+  g_assert_cmpuint (f->audit.first_irq0002_count, ==, 0u);
+  g_assert_true (goodix_fpi_usb_backend_is_drained (f->backend));
+  assert_no_contact_sources (context);
+  fixture_free (f);
+  g_main_context_pop_thread_default (context);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1915,6 +2087,20 @@ main (int argc, char **argv)
   g_test_add_data_func ("/irq80/login-capture", GUINT_TO_POINTER (1u), test_irq80_bounded_and_capture);
   g_test_add_func ("/irq80/third-limit", test_irq80_limit);
   g_test_add_func ("/irq80/unauthorized-and-ordinary-wait", test_irq80_unauthorized_and_ordinary_wait);
+  g_test_add_func ("/irq80/missing-timestamp", test_irq80_missing_timestamp);
+  const guint bad_raw[] = { 0u, 1u, 0x01feu, 0x01ffu, 0x0200u, 0xffffu };
+  for (guint i = 0u; i < G_N_ELEMENTS (bad_raw); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/irq80/raw/%04x", bad_raw[i]);
+      g_test_add_data_func (path, GUINT_TO_POINTER (bad_raw[i]), test_irq80_invalid_raw);
+    }
+  const gchar *rearm_failure[] = { "early-ack", "early-irq80", "early-irq2", "wrong-ack",
+                                  "out-error", "cancel-pending", "stale-completion", "missing-ack" };
+  for (guint i = 0u; i < G_N_ELEMENTS (rearm_failure); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/irq80/rearm/%s", rearm_failure[i]);
+      g_test_add_data_func (path, rearm_failure[i], test_irq80_rearm_failure);
+    }
   const gchar *teardown[] = { "cancel", "free", "generation" };
   for (guint i = 0u; i < G_N_ELEMENTS (teardown); i++)
     {

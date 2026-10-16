@@ -68,6 +68,8 @@ typedef struct
   guint16 second_arm_timestamp;
   GoodixPostTlsCaptureProfile capture_profile;
   GoodixPostTlsFdtSeedMode fdt_seed_mode;
+  /* Fresh timestamps for IRQ0080 re-arms only; ordinary material is unchanged. */
+  guint16 (*next_timestamp) (void);
 } GoodixPostTlsMaterial;
 
 typedef struct

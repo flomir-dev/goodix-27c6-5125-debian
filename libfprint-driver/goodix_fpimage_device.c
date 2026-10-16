@@ -432,7 +432,7 @@ production_enrollment_auxiliary (GBytes   *plaintext,
 static void
 production_activation_start_secure_graph (GoodixDeviceContext *ctx)
 {
-  GoodixPostTlsMaterial post_material = { 0 };
+  GoodixPostTlsMaterial post_material = { .next_timestamp = production_timestamp };
   GoodixEnrollmentModelConfig enrollment_config = {
     .required_stage_count = GOODIX_SIGFM_ENROLL_REQUIRED_STAGES,
 #ifdef GOODIX_LIBFPRINT_SIGFM

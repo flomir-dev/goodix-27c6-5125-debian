@@ -48,7 +48,8 @@ intent_contract_valid (const GoodixEnrollmentCommandIntent *intent)
     case GOODIX_ENROLLMENT_EVENT_COMMAND_32:
       return intent->control == 0x32 &&
              (intent->purpose == GOODIX_ENROLLMENT_COMMAND_PURPOSE_FIRST_NAV_PREPARE ||
-              intent->purpose == GOODIX_ENROLLMENT_COMMAND_PURPOSE_INTER_STAGE_REARM) &&
+              intent->purpose == GOODIX_ENROLLMENT_COMMAND_PURPOSE_INTER_STAGE_REARM ||
+              intent->purpose == GOODIX_ENROLLMENT_COMMAND_PURPOSE_IRQ80_REARM) &&
              intent->body_class == GOODIX_ENROLLMENT_BODY_FDT_TIMESTAMP_0801;
     case GOODIX_ENROLLMENT_EVENT_COMMAND_34:
       return intent->control == 0x34 &&

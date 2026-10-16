@@ -67,6 +67,28 @@ goodix_enrollment_fdt_state_free (GoodixEnrollmentFdtState *state)
 }
 
 gboolean
+goodix_enrollment_fdt_state_refresh_irq80 (
+  GoodixEnrollmentFdtState *state,
+  const guint8 raw[GOODIX_ENROLLMENT_FDT_TABLE_LENGTH],
+  guint8 table[GOODIX_ENROLLMENT_FDT_TABLE_LENGTH],
+  GError **error)
+{
+  guint8 candidate[GOODIX_ENROLLMENT_FDT_TABLE_LENGTH];
+
+  if (state == NULL || raw == NULL || table == NULL || state->failed ||
+      state->down_stage != state->current_stage)
+    return fail (state, GOODIX_ENROLLMENT_FDT_ERROR_ORDER,
+                 "IRQ0080 DOWN refresh is outside an IRQ2 wait", error);
+  /* Same masked component and 1..254 contract as OEM gfFDTDownbase. */
+  if (!goodix_fdt_derive_baseline_table (raw, 0u, candidate))
+    return fail (state, GOODIX_ENROLLMENT_FDT_ERROR_RANGE,
+                 "IRQ0080 FDT material is invalid", error);
+  memcpy (state->down_table, candidate, sizeof candidate);
+  memcpy (table, candidate, sizeof candidate);
+  return TRUE;
+}
+
+gboolean
 goodix_enrollment_fdt_state_observe_irq2 (
   GoodixEnrollmentFdtState *state,
   guint                     stage_index,

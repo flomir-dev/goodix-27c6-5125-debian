@@ -37,6 +37,7 @@ struct _GoodixPostTlsLifecycle
   gboolean login_authorized;
   guint login_attempts;
   guint first_contact_irq80_count;
+  gboolean irq80_rearm_pending;
   GoodixPostTlsEventFunc release_tail;
   GoodixPostTlsEventFunc finger_up;
   GoodixPostTlsTerminalFunc terminal;
@@ -797,8 +798,20 @@ goodix_post_tls_lifecycle_handle_a0 (GoodixPostTlsLifecycle *lifecycle,
       lifecycle->phase = GOODIX_POST_TLS_PHASE_FDT_B0;
       break;
     case GOODIX_POST_TLS_PHASE_FIRST_ARM:
+      if (lifecycle->irq80_rearm_pending &&
+          (lifecycle->out_pending ||
+           goodix_fpi_usb_backend_get_out_outstanding (lifecycle->backend) != 0u))
+        goto unexpected;
       if (!accept_ack (lifecycle, &message))
         goto unexpected;
+      if (lifecycle->irq80_rearm_pending)
+        {
+          lifecycle->irq80_rearm_pending = FALSE;
+          lifecycle->phase = GOODIX_POST_TLS_PHASE_FIRST_IRQ2;
+          g_message ("GOODIX_IRQ80 path=post-tls event=ack32 count=%u",
+                     lifecycle->first_contact_irq80_count);
+          break;
+        }
       if (lifecycle->first_arm_handoff != NULL)
         {
           if (lifecycle->out_pending ||
@@ -840,6 +853,8 @@ goodix_post_tls_lifecycle_handle_a0 (GoodixPostTlsLifecycle *lifecycle,
           event_fields (&message, &irq, &flags, &raw) &&
           irq == 0x0080 && flags == 0u)
         {
+          guint8 down[GOODIX_POST_TLS_FDT_TABLE_LENGTH];
+
           if (lifecycle->first_contact_irq80_count >= GOODIX_FIRST_CONTACT_IRQ80_LIMIT)
             {
               g_message ("GOODIX_IRQ80 path=post-tls event=reject reason=limit count=%u",
@@ -848,9 +863,19 @@ goodix_post_tls_lifecycle_handle_a0 (GoodixPostTlsLifecycle *lifecycle,
                                       "Goodix first-contact IRQ0080 limit exceeded");
               break;
             }
+          if (lifecycle->out_pending ||
+              !goodix_fdt_derive_baseline_table (raw, 0u, down) ||
+              lifecycle->material.next_timestamp == NULL)
+            goto unexpected;
+          memcpy (lifecycle->current_fdt_table, down, sizeof down);
+          lifecycle->material.first_arm_timestamp =
+            lifecycle->material.next_timestamp ();
           lifecycle->first_contact_irq80_count++;
-          g_message ("GOODIX_IRQ80 path=post-tls event=absorbed count=%u",
+          lifecycle->irq80_rearm_pending = TRUE;
+          g_message ("GOODIX_IRQ80 path=post-tls event=rearm32 count=%u",
                      lifecycle->first_contact_irq80_count);
+          submit_or_fail (lifecycle, submit_arm (lifecycle, FALSE, &error),
+                          &error);
           break;
         }
       if (message.control != 0x32 ||
@@ -863,6 +888,7 @@ goodix_post_tls_lifecycle_handle_a0 (GoodixPostTlsLifecycle *lifecycle,
           if (!goodix_fdt_derive_up_table (
                 raw, flags, 0x1du, lifecycle->first_up_table))
             goto unexpected;
+          lifecycle->first_contact_irq80_count = 0u;
           if (lifecycle->audit != NULL)
             lifecycle->audit->first_irq0002_count++;
           if (lifecycle->finger_down != NULL)

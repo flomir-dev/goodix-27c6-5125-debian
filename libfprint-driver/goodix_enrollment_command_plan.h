@@ -18,6 +18,8 @@ typedef enum
   GOODIX_ENROLLMENT_COMMAND_PURPOSE_FIRST_NAV_PREPARE,
   GOODIX_ENROLLMENT_COMMAND_PURPOSE_FIRST_NAV,
   GOODIX_ENROLLMENT_COMMAND_PURPOSE_INTER_STAGE_REARM,
+  /* Event adapter recovery; never advances the enrollment command plan. */
+  GOODIX_ENROLLMENT_COMMAND_PURPOSE_IRQ80_REARM,
 } GoodixEnrollmentCommandPurpose;
 
 typedef enum

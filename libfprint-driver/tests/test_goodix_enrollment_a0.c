@@ -24,6 +24,11 @@ typedef struct
   guint down_count;
   guint up_count;
   gboolean fail_contact;
+  guint timestamp_calls;
+  guint16 last_timestamp;
+  guint timestamp_stage;
+  GoodixEnrollmentCommandPurpose timestamp_purpose;
+  gboolean fail_timestamp;
 } Fixture;
 
 static gboolean
@@ -50,10 +55,18 @@ static gboolean
 timestamp_ready (guint stage, GoodixEnrollmentCommandPurpose purpose,
                  guint16 *timestamp, gpointer user_data, GError **error)
 {
-  (void) purpose;
-  (void) user_data;
-  (void) error;
-  *timestamp = (guint16) (0x3000u + stage);
+  Fixture *f = user_data;
+  f->timestamp_calls++;
+  f->timestamp_stage = stage;
+  f->timestamp_purpose = purpose;
+  if (f->fail_timestamp)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "synthetic timestamp failure");
+      return FALSE;
+    }
+  *timestamp = (guint16) (0x3000u + f->timestamp_calls);
+  f->last_timestamp = *timestamp;
   return TRUE;
 }
 
@@ -741,7 +754,8 @@ static void
 assert_irq80_no_progress (Fixture *f)
 {
   guint commands = 0u;
-  for (guint i = 0u; i < G_N_ELEMENTS (f->commands); i++) commands += f->commands[i];
+  for (guint i = 0u; i < G_N_ELEMENTS (f->commands); i++)
+    if (i != 0x32) commands += f->commands[i];
   g_assert_cmpuint (commands, ==, 0u);
   g_assert_cmpuint (f->images, ==, 0u);
   g_assert_cmpuint (f->down_count, ==, 0u);
@@ -749,8 +763,55 @@ assert_irq80_no_progress (Fixture *f)
   g_assert_cmpuint (f->audit.irq2_count, ==, 0u);
   g_assert_cmpuint (f->audit.lifecycle.plan.pipeline.protocol.observed_primary_stage_count, ==, 0u);
   g_assert_cmpuint (f->audit.lifecycle.plan.pipeline.protocol.completed_stage_count, ==, 0u);
-  g_assert_cmpuint (f->binding_audit.backend_submit_attempt_count, ==, 0u);
+  g_assert_cmpuint (f->binding_audit.backend_submit_attempt_count, ==, f->commands[0x32]);
   g_assert_cmpuint (goodix_fpi_usb_backend_get_real_submit_count (f->backend), ==, 0u);
+}
+
+/* The existing completion-gated binding must send exactly one OUT, then wait
+ * for its exact ACK before IRQ2. The model itself never observes a command. */
+static void
+rearm_irq80 (Fixture *f)
+{
+  GoodixEnrollmentModelAudit before = f->audit.lifecycle.plan.pipeline.protocol;
+  GoodixEnrollmentPreparedCommand first = { 0 }, cached = { 0 };
+  guint commands = f->commands[0x32];
+  guint timestamps = f->timestamp_calls;
+  guint stage_commands = f->audit.lifecycle.plan.committed_command_count;
+  accept_irq (f, 0x32, 0x0080, 0u);
+  g_assert_cmpuint (f->commands[0x32], ==, commands + 1u);
+  g_assert_cmpuint (f->timestamp_calls, ==, timestamps + 1u);
+  g_assert_cmpint (f->timestamp_purpose, ==, GOODIX_ENROLLMENT_COMMAND_PURPOSE_IRQ80_REARM);
+  g_assert_cmpuint (f->timestamp_stage, ==, f->audit.irq2_count + 1u);
+  g_assert_true (goodix_enrollment_fpi_usb_binding_has_pending (f->binding));
+  g_assert_false (goodix_enrollment_fpi_usb_binding_needs_receive (f->binding));
+  g_assert_cmpint (goodix_enrollment_post_tls_events_get_expected_event (f->events), ==,
+                   GOODIX_ENROLLMENT_EVENT_COMMAND_32);
+  g_assert_cmphex (f->last_out[7], ==, 0x08);
+  g_assert_cmphex (f->last_out[8], ==, 0x01);
+  for (guint i = 0u; i < GOODIX_FDT_CHANNEL_COUNT; i++)
+    {
+      g_assert_cmphex (f->last_out[9u + i*2u], ==, 0x80);
+      g_assert_cmphex (f->last_out[10u + i*2u], ==, 0x44u + i);
+    }
+  g_assert_cmphex (f->last_out[21], ==, (guint8) f->last_timestamp);
+  g_assert_cmphex (f->last_out[22], ==, (guint8) (f->last_timestamp >> 8));
+  g_assert_true (goodix_enrollment_post_tls_events_prepare (f->events, &first, NULL));
+  g_assert_true (goodix_enrollment_post_tls_events_prepare (f->events, &cached, NULL));
+  g_assert_cmpmem (&first, sizeof first, &cached, sizeof cached);
+  g_assert_cmpuint (f->timestamp_calls, ==, timestamps + 1u);
+  goodix_fpi_usb_backend_complete_out (f->backend, 7u, NULL);
+  g_assert_cmpint (goodix_enrollment_post_tls_events_get_expected_event (f->events), ==,
+                   GOODIX_ENROLLMENT_EVENT_ACK_32);
+  g_assert_true (goodix_enrollment_fpi_usb_binding_needs_receive (f->binding));
+  const guint8 ack_body[] = { 0x32, 1 };
+  g_autoptr(GBytes) ack32 = frame (0xb0, ack_body, sizeof ack_body);
+  accept_a0 (f, ack32);
+  g_assert_cmpint (goodix_enrollment_post_tls_events_get_expected_event (f->events), ==,
+                   GOODIX_ENROLLMENT_EVENT_IRQ2);
+  g_assert_cmpuint (f->commands[0x32], ==, commands + 1u);
+  g_assert_false (goodix_enrollment_fpi_usb_binding_has_pending (f->binding));
+  g_assert_cmpmem (&before, sizeof before, &f->audit.lifecycle.plan.pipeline.protocol, sizeof before);
+  g_assert_cmpuint (f->audit.lifecycle.plan.committed_command_count, ==, stage_commands);
 }
 
 static void
@@ -770,11 +831,11 @@ test_irq80_capture (void)
   g_main_context_push_thread_default (context);
   irq80_fixture_init (&f);
   assert_no_contact_sources (context);
-  accept_irq (&f, 0x32, 0x0080, 0u);
+  rearm_irq80 (&f);
   assert_irq80_no_progress (&f);
   assert_no_contact_sources (context);
   g_assert_cmpint (goodix_enrollment_post_tls_events_get_expected_event (f.events), ==, GOODIX_ENROLLMENT_EVENT_IRQ2);
-  accept_irq (&f, 0x32, 0x0080, 0u);
+  rearm_irq80 (&f);
   assert_irq80_no_progress (&f);
   assert_no_contact_sources (context);
   begin_contact (&f, 1u);
@@ -795,8 +856,8 @@ test_irq80_third_limit (void)
 {
   Fixture f;
   irq80_fixture_init (&f);
-  accept_irq (&f, 0x32, 0x0080, 0u);
-  accept_irq (&f, 0x32, 0x0080, 0u);
+  rearm_irq80 (&f);
+  rearm_irq80 (&f);
   g_autoptr(GBytes) reverse = irq_frame (0x32, 0x0080, 0u, 16u);
   reject_without_progress (&f, reverse, "limit exceeded", FALSE);
   assert_irq80_no_progress (&f);
@@ -813,7 +874,7 @@ test_irq80_teardown (gconstpointer data)
   Fixture f;
   g_main_context_push_thread_default (context);
   irq80_fixture_init (&f);
-  accept_irq (&f, 0x32, 0x0080, 0u);
+  rearm_irq80 (&f);
   assert_no_contact_sources (context);
   if (g_str_equal (mode, "cancel"))
     {
@@ -851,6 +912,9 @@ test_irq80_teardown (gconstpointer data)
           f.binding = goodix_enrollment_fpi_usb_binding_new (
             f.events, f.backend, 8u, &f.binding_audit, NULL);
           g_assert_nonnull (f.binding);
+          memset (f.commands, 0, sizeof f.commands);
+          goodix_fpi_usb_backend_complete_out (f.backend, 7u, NULL);
+          g_assert_cmpuint (f.binding_audit.backend_completion_count, ==, 0u);
         }
     }
   assert_no_contact_sources (context);
@@ -873,7 +937,7 @@ test_irq80_negative (gconstpointer data)
   const gchar *mode = data;
   Fixture f;
   irq80_fixture_init (&f);
-  accept_irq (&f, 0x32, 0x0080, 0u);
+  rearm_irq80 (&f);
   guint8 control = g_str_equal (mode, "control") ? 0x34 : 0x32;
   guint16 flags = g_str_equal (mode, "flags") ? 1u : 0u;
   guint16 irq = g_str_equal (mode, "irq-bits") ? 0x0082 : 0x0080;
@@ -926,7 +990,8 @@ test_irq80_per_wait_quota (gconstpointer data)
                        GOODIX_ENROLLMENT_EVENT_IRQ2);
       for (guint i = 0u; i < 2u; i++)
         {
-          accept_irq (&f, 0x32, 0x0080, 0u);
+          rearm_irq80 (&f);
+          commands[0x32]++;
           g_assert_cmpmem (commands, sizeof commands, f.commands, sizeof f.commands);
           g_assert_cmpuint (f.images, ==, stage - 1u);
           g_assert_cmpuint (f.down_count, ==, stage - 1u);
@@ -968,8 +1033,9 @@ test_irq80_stale_release_keeps_quota (void)
   ack (&f, 0x32);
   guint commands[256];
   memcpy (commands, f.commands, sizeof commands);
-  accept_irq (&f, 0x32, 0x0080, 0u);
-  accept_irq (&f, 0x32, 0x0080, 0u);
+  rearm_irq80 (&f);
+  rearm_irq80 (&f);
+  commands[0x32] += 2u;
   accept_irq (&f, 0x34, 0x0200, 0u);
   const GoodixZeroMaskRecoveryAudit *z = goodix_enrollment_fpi_usb_binding_zero_audit (f.binding);
   g_assert_cmpuint (z->recovered_count, ==, 1u);
@@ -990,8 +1056,8 @@ test_irq80_rejected_contact_stays_terminal (void)
 {
   Fixture f;
   irq80_fixture_init (&f);
-  accept_irq (&f, 0x32, 0x0080, 0u);
-  accept_irq (&f, 0x32, 0x0080, 0u);
+  rearm_irq80 (&f);
+  rearm_irq80 (&f);
   f.fail_contact = TRUE;
   g_autoptr(GBytes) down = irq_frame (0x32, 0x0002, 0x002f, 16u);
   reject_without_progress (&f, down, "synthetic contact rejection", FALSE);
@@ -1017,6 +1083,179 @@ test_irq80_ordinary_wait (void)
   g_main_context_pop_thread_default (context);
 }
 
+static GBytes *
+irq80_raw_frame (guint16 word)
+{
+  guint8 body[16] = { 0x80 };
+  for (guint i = 0u; i < GOODIX_FDT_CHANNEL_COUNT; i++)
+    body[4u + i*2u] = (guint8) (0x88u + i*2u);
+  /* Last word ensures an invalid value follows five valid derivations. */
+  body[14] = (guint8) word;
+  body[15] = (guint8) (word >> 8);
+  return frame (0x32, body, sizeof body);
+}
+
+static void
+test_irq80_raw (gconstpointer data)
+{
+  guint16 word = (guint16) GPOINTER_TO_UINT (data);
+  guint q = (word >> 1) & 0xffu;
+  Fixture f;
+  irq80_fixture_init (&f);
+  g_autoptr(GBytes) reverse = irq80_raw_frame (word);
+  if (q == 0u || q == 255u)
+    {
+      reject_without_progress (&f, reverse, "FDT material is invalid", FALSE);
+      g_assert_cmpuint (f.timestamp_calls, ==, 0u);
+      g_assert_cmpuint (f.commands[0x32], ==, 0u);
+    }
+  else
+    {
+      accept_a0 (&f, reverse);
+      g_assert_cmpuint (f.commands[0x32], ==, 1u);
+      g_assert_cmphex (f.last_out[19], ==, 0x80);
+      g_assert_cmphex (f.last_out[20], ==, q);
+      ack (&f, 0x32);
+      g_assert_cmpint (goodix_enrollment_post_tls_events_get_expected_event (f.events), ==,
+                       GOODIX_ENROLLMENT_EVENT_IRQ2);
+    }
+  assert_irq80_no_progress (&f);
+  fixture_clear (&f);
+}
+
+static void
+test_irq80_down_refresh (void)
+{
+  Fixture f;
+  irq80_fixture_init (&f);
+  begin_contact (&f, 1u);
+  finish_contact (&f, 1u, 0x002f);
+  guint16 previous_timestamp = f.last_timestamp;
+  guint commands = f.commands[0x32];
+  guint timestamps = f.timestamp_calls;
+  guint8 previous_down[12];
+  memcpy (previous_down, f.last_out + 9u, sizeof previous_down);
+  /* High bits deliberately exercise OEM masking; q=0x1a differs from the
+   * previous release's q=0x49 for the final channel. */
+  g_autoptr(GBytes) reverse = irq80_raw_frame (0x1234u);
+  accept_a0 (&f, reverse);
+  g_assert_cmpuint (f.commands[0x32], ==, commands + 1u);
+  g_assert_cmpuint (f.timestamp_calls, ==, timestamps + 1u);
+  g_assert_cmphex (f.last_timestamp, !=, previous_timestamp);
+  g_assert_cmphex (f.last_out[20], ==, 0x1a);
+  g_assert_cmphex (previous_down[11], !=, f.last_out[20]);
+  guint8 updated_down[12];
+  memcpy (updated_down, f.last_out + 9u, sizeof updated_down);
+  ack (&f, 0x32);
+  accept_irq (&f, 0x32, 0x0002, 0x002f);
+  ack (&f, 0x22);
+  feed_b0 (&f, TRUE);
+  ack (&f, 0x34);
+  g_assert_cmphex (f.last_control, ==, 0x36);
+  g_assert_cmpmem (f.last_out + 9u, sizeof updated_down,
+                   updated_down, sizeof updated_down);
+  ack (&f, 0x36);
+  finish_contact (&f, 2u, 0x002f);
+  g_assert_cmpuint (f.images, ==, 2u);
+  g_assert_cmpuint (f.audit.lifecycle.plan.pipeline.protocol.completed_stage_count, ==, 2u);
+  fixture_clear (&f);
+}
+
+static void
+test_irq80_failures (gconstpointer data)
+{
+  const gchar *mode = data;
+  g_autoptr(GMainContext) context = g_main_context_new ();
+  Fixture f;
+  g_main_context_push_thread_default (context);
+  irq80_fixture_init (&f);
+  g_autoptr(GBytes) reverse = irq_frame (0x32, 0x0080, 0u, 16u);
+  g_autoptr(GBytes) down = irq_frame (0x32, 0x0002, 0x002f, 16u);
+  const guint8 ack_body[] = { 0x32, 1 };
+  g_autoptr(GBytes) ack32 = frame (0xb0, ack_body, sizeof ack_body);
+  g_autoptr(GError) error = NULL;
+
+  if (g_str_equal (mode, "timestamp"))
+    {
+      f.fail_timestamp = TRUE;
+      reject_without_progress (&f, reverse, "timestamp failure", FALSE);
+      g_assert_cmpuint (f.commands[0x32], ==, 0u);
+    }
+  else if (g_str_equal (mode, "terminal-fence"))
+    {
+      goodix_fpi_usb_backend_cancel (f.backend);
+      reject_without_progress (&f, reverse, "fenced", FALSE);
+      g_assert_cmpuint (f.commands[0x32], ==, 0u);
+    }
+  else
+    {
+      accept_a0 (&f, reverse);
+      g_assert_cmpuint (f.commands[0x32], ==, 1u);
+      if (g_str_equal (mode, "stale-completion"))
+        {
+          goodix_fpi_usb_backend_complete_out (f.backend, 6u, NULL);
+          g_assert_cmpuint (f.binding_audit.backend_completion_count, ==, 0u);
+          g_assert_true (goodix_enrollment_fpi_usb_binding_has_pending (f.binding));
+          g_assert_cmpint (goodix_enrollment_post_tls_events_get_expected_event (f.events), ==,
+                           GOODIX_ENROLLMENT_EVENT_COMMAND_32);
+          ack (&f, 0x32);
+          g_assert_cmpuint (f.binding_audit.backend_completion_count, ==, 1u);
+        }
+      else if (g_str_equal (mode, "out-error"))
+        {
+          g_autoptr(GError) failure = g_error_new_literal (
+            G_IO_ERROR, G_IO_ERROR_FAILED, "synthetic IRQ0080 OUT failure");
+          goodix_fpi_usb_backend_complete_out (f.backend, 7u, failure);
+          g_assert_true (goodix_enrollment_fpi_usb_binding_is_failed (f.binding));
+          g_assert_cmpuint (f.binding_audit.transaction.committed_after_completion_count, ==, 0u);
+        }
+      else if (g_str_equal (mode, "ack-early") ||
+               g_str_equal (mode, "irq2-early") ||
+               g_str_equal (mode, "repeat-pending"))
+        reject_without_progress (&f, g_str_equal (mode, "ack-early") ? ack32 :
+          (g_str_equal (mode, "irq2-early") ? down : reverse), "pending", FALSE);
+      else if (g_str_equal (mode, "duplicate-submit"))
+        {
+          g_assert_false (goodix_enrollment_fpi_usb_binding_submit_next (f.binding, &error));
+          g_assert_nonnull (error);
+          g_assert_true (goodix_enrollment_fpi_usb_binding_is_failed (f.binding));
+        }
+      else
+        {
+          if (!g_str_equal (mode, "cancel-pending"))
+            goodix_fpi_usb_backend_complete_out (f.backend, 7u, NULL);
+          if (g_str_has_prefix (mode, "cancel-") || g_str_equal (mode, "missing-ack"))
+            {
+              assert_no_contact_sources (context);
+              g_assert_false (g_main_context_iteration (context, FALSE));
+              g_assert_cmpuint (f.commands[0x32], ==, 1u);
+              goodix_enrollment_fpi_usb_binding_cancel (f.binding, "cancel IRQ0080 recovery");
+              reject_without_progress (&f, ack32, NULL, FALSE);
+              if (g_str_equal (mode, "cancel-pending"))
+                goodix_fpi_usb_backend_complete_out (f.backend, 7u, NULL);
+            }
+          else if (g_str_equal (mode, "irq2-before-ack"))
+            reject_without_progress (&f, down, "expected ACK_32", FALSE);
+          else
+            {
+              guint8 body[] = { 0x32, 1 };
+              if (g_str_equal (mode, "ack-wrong-echo")) body[0] = 0x34;
+              if (g_str_equal (mode, "ack-wrong-status")) body[1] = 0;
+              g_autoptr(GBytes) invalid = frame (0xb0, body,
+                g_str_equal (mode, "ack-short") ? 1u : 2u);
+              reject_without_progress (&f, invalid, "expected ACK_32", FALSE);
+            }
+        }
+      g_assert_cmpuint (f.commands[0x32], ==, 1u);
+    }
+  g_assert_cmpuint (f.audit.irq2_count, ==, 0u);
+  g_assert_cmpuint (f.images, ==, 0u);
+  g_assert_cmpuint (f.audit.lifecycle.plan.pipeline.protocol.observed_primary_stage_count, ==, 0u);
+  g_assert_cmpuint (f.audit.lifecycle.plan.committed_command_count, ==, 0u);
+  fixture_clear (&f);
+  g_main_context_pop_thread_default (context);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1029,6 +1268,25 @@ main (int argc, char **argv)
   g_test_add_func ("/irq80/capture", test_irq80_capture);
   g_test_add_func ("/irq80/third-limit", test_irq80_third_limit);
   g_test_add_func ("/irq80/ordinary-wait", test_irq80_ordinary_wait);
+  g_test_add_func ("/irq80/down-refresh-used-by-next36", test_irq80_down_refresh);
+  const guint irq80_words[] = { 0x0002u, 0x01fdu, 0x0202u, 0x1234u,
+                                0u, 1u, 0x01feu, 0x01ffu, 0xffffu };
+  for (guint i = 0u; i < G_N_ELEMENTS (irq80_words); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/irq80/raw/%04x", irq80_words[i]);
+      g_test_add_data_func (path, GUINT_TO_POINTER (irq80_words[i]), test_irq80_raw);
+    }
+  const gchar *irq80_failures[] = {
+    "timestamp", "terminal-fence", "stale-completion", "out-error", "ack-early",
+    "irq2-early", "repeat-pending", "duplicate-submit", "cancel-pending",
+    "cancel-before-ack", "missing-ack", "irq2-before-ack", "ack-wrong-echo",
+    "ack-wrong-status", "ack-short"
+  };
+  for (guint i = 0u; i < G_N_ELEMENTS (irq80_failures); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/irq80/fail/%s", irq80_failures[i]);
+      g_test_add_data_func (path, irq80_failures[i], test_irq80_failures);
+    }
   g_test_add_data_func ("/irq80/quota/every-contact", GUINT_TO_POINTER (0u), test_irq80_per_wait_quota);
   g_test_add_data_func ("/irq80/quota/third-in-later-wait", GUINT_TO_POINTER (1u), test_irq80_per_wait_quota);
   g_test_add_func ("/irq80/quota/stale-release-keeps-quota", test_irq80_stale_release_keeps_quota);

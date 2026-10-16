@@ -33,6 +33,10 @@ struct _GoodixEnrollmentPostTlsEvents
   gboolean zero_enabled;
   GoodixZeroMaskRecoveryAudit zero;
   guint irq80_count;
+  /* The enrollment graph stays at IRQ2 throughout this completion/ACK-gated
+   * exception. Its command and material are separate from stage transitions. */
+  GoodixEnrollmentEvent irq80_rearm_event;
+  GoodixEnrollmentPreparedCommand irq80_rearm;
 };
 
 static void
@@ -67,6 +71,8 @@ events_fail (GoodixEnrollmentPostTlsEvents *events,
   if (events != NULL && !events->failed)
     {
       events->failed = TRUE;
+      events->irq80_rearm_event = GOODIX_ENROLLMENT_EVENT_NONE;
+      goodix_enrollment_prepared_command_clear (&events->irq80_rearm);
       goodix_enrollment_post_tls_events_close_zero_window (events);
       events->audit->failed = TRUE;
       /* A valid unusable contact is not protocol corruption. Keep the
@@ -134,6 +140,7 @@ goodix_enrollment_post_tls_events_free (GoodixEnrollmentPostTlsEvents *events)
                events->zero.recovered_count, events->zero.late_release_count,
                events->zero.rearm32_count);
   clear_pending (events->b0_pending);
+  goodix_enrollment_prepared_command_clear (&events->irq80_rearm);
   g_byte_array_unref (events->b0_pending);
   goodix_enrollment_lifecycle_adapter_free (events->lifecycle);
   g_free (events);
@@ -434,8 +441,7 @@ goodix_enrollment_post_tls_events_handle_a0 (
   if (events->failed || events->b0_pending->len != 0u)
     return events_fail (events, GOODIX_ENROLLMENT_POST_TLS_ERROR_STATE,
                         "post-TLS event adapter is terminal", error);
-  expected = goodix_enrollment_lifecycle_adapter_get_expected_event (
-    events->lifecycle);
+  expected = goodix_enrollment_post_tls_events_get_expected_event (events);
   if (expected == GOODIX_ENROLLMENT_EVENT_NAV)
     {
       if (!parse_nav_no_check (frame))
@@ -464,19 +470,31 @@ goodix_enrollment_post_tls_events_handle_a0 (
       message.control == 0x32 && body_length == 16u &&
       body[0] == 0x80 && body[1] == 0u && body[2] == 0u && body[3] == 0u)
     {
-      goodix_a0_message_clear (&message);
+      GoodixEnrollmentPreparedCommand rearm = { 0 };
+
       if (events->irq80_count >= GOODIX_IRQ80_PER_WAIT_LIMIT)
         {
+          goodix_a0_message_clear (&message);
           g_message ("GOODIX_IRQ80 path=enrollment event=reject reason=limit count=%u contacts=%u",
                      events->irq80_count,
                      events->audit->lifecycle.plan.pipeline.protocol.observed_primary_stage_count);
           return events_fail (events, GOODIX_ENROLLMENT_POST_TLS_ERROR_EVENT,
                               "Goodix enrollment IRQ0080 limit exceeded while waiting for IRQ2", error);
         }
+      if (!goodix_enrollment_lifecycle_adapter_prepare_irq80_rearm (
+            events->lifecycle, body + 4u, &rearm, error))
+        {
+          goodix_a0_message_clear (&message);
+          return events_fail (events, GOODIX_ENROLLMENT_POST_TLS_ERROR_EVENT,
+                              "Goodix IRQ0080 rearm preparation failed", error);
+        }
+      events->irq80_rearm = rearm;
+      events->irq80_rearm_event = GOODIX_ENROLLMENT_EVENT_COMMAND_32;
       events->irq80_count++;
-      g_message ("GOODIX_IRQ80 path=enrollment event=absorbed count=%u contacts=%u",
+      g_message ("GOODIX_IRQ80 path=enrollment event=rearm count=%u contacts=%u",
                  events->irq80_count,
                  events->audit->lifecycle.plan.pipeline.protocol.observed_primary_stage_count);
+      goodix_a0_message_clear (&message);
       return TRUE;
     }
 
@@ -486,8 +504,17 @@ goodix_enrollment_post_tls_events_handle_a0 (
           body[0] != echo || body[1] != 0x01)
         goto out;
       frame_matches_expected = TRUE;
-      accepted = goodix_enrollment_lifecycle_adapter_observe (
-        events->lifecycle, expected, NULL, 0u, NULL, 0u, 0u, error);
+      if (events->irq80_rearm_event == GOODIX_ENROLLMENT_EVENT_ACK_32)
+        {
+          events->irq80_rearm_event = GOODIX_ENROLLMENT_EVENT_NONE;
+          goodix_enrollment_prepared_command_clear (&events->irq80_rearm);
+          accepted = TRUE;
+          g_message ("GOODIX_IRQ80 path=enrollment event=ack32 count=%u",
+                     events->irq80_count);
+        }
+      else
+        accepted = goodix_enrollment_lifecycle_adapter_observe (
+          events->lifecycle, expected, NULL, 0u, NULL, 0u, 0u, error);
       if (accepted)
         events->audit->ack_count++;
     }
@@ -774,6 +801,14 @@ goodix_enrollment_post_tls_events_prepare (
       events->zero.awaiting_sample_request)
     return events_fail (events, GOODIX_ENROLLMENT_POST_TLS_ERROR_STATE,
                         "post-TLS event adapter is absent or terminal", error);
+  if (events->irq80_rearm_event == GOODIX_ENROLLMENT_EVENT_COMMAND_32)
+    {
+      if (prepared == NULL)
+        return events_fail (events, GOODIX_ENROLLMENT_POST_TLS_ERROR_ARGUMENT,
+                            "IRQ0080 prepared-command output is absent", error);
+      *prepared = events->irq80_rearm;
+      return TRUE;
+    }
   if (!goodix_enrollment_lifecycle_adapter_prepare (
         events->lifecycle, prepared, error))
     return events_fail (events, GOODIX_ENROLLMENT_POST_TLS_ERROR_EVENT,
@@ -790,6 +825,15 @@ goodix_enrollment_post_tls_events_commit (
   if (events == NULL || events->failed || events->b0_pending->len != 0u)
     return events_fail (events, GOODIX_ENROLLMENT_POST_TLS_ERROR_STATE,
                         "post-TLS event adapter is absent or terminal", error);
+  if (events->irq80_rearm_event != GOODIX_ENROLLMENT_EVENT_NONE)
+    {
+      if (events->irq80_rearm_event != GOODIX_ENROLLMENT_EVENT_COMMAND_32 ||
+          command_event != GOODIX_ENROLLMENT_EVENT_COMMAND_32)
+        return events_fail (events, GOODIX_ENROLLMENT_POST_TLS_ERROR_STATE,
+                            "IRQ0080 rearm completion is unexpected", error);
+      events->irq80_rearm_event = GOODIX_ENROLLMENT_EVENT_ACK_32;
+      return TRUE;
+    }
   if (!goodix_enrollment_lifecycle_adapter_commit (
         events->lifecycle, command_event, error))
     return events_fail (events, GOODIX_ENROLLMENT_POST_TLS_ERROR_EVENT,
@@ -809,7 +853,9 @@ goodix_enrollment_post_tls_events_get_expected_event (
   const GoodixEnrollmentPostTlsEvents *events)
 {
   return events != NULL && !events->failed ?
-    goodix_enrollment_lifecycle_adapter_get_expected_event (events->lifecycle) :
+    (events->irq80_rearm_event != GOODIX_ENROLLMENT_EVENT_NONE ?
+     events->irq80_rearm_event :
+     goodix_enrollment_lifecycle_adapter_get_expected_event (events->lifecycle)) :
     GOODIX_ENROLLMENT_EVENT_NONE;
 }
 

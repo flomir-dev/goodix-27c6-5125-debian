@@ -66,6 +66,13 @@ gboolean goodix_enrollment_lifecycle_adapter_prepare (
   GoodixEnrollmentLifecycleAdapter *adapter,
   GoodixEnrollmentPreparedCommand  *prepared,
   GError                          **error);
+/* IRQ0080 exception only: refresh DOWN and build one rearm without committing
+ * or observing a command/contact in the stage graph, which stays at IRQ2. */
+gboolean goodix_enrollment_lifecycle_adapter_prepare_irq80_rearm (
+  GoodixEnrollmentLifecycleAdapter *adapter,
+  const guint8 raw[GOODIX_ENROLLMENT_FDT_TABLE_LENGTH],
+  GoodixEnrollmentPreparedCommand *prepared,
+  GError **error);
 
 /* Commits only the event represented by the cached prepared command.  No
  * serialization or transport occurs in this adapter. */

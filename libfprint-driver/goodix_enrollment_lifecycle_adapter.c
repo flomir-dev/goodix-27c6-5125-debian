@@ -183,6 +183,51 @@ goodix_enrollment_lifecycle_adapter_observe (
 }
 
 gboolean
+goodix_enrollment_lifecycle_adapter_prepare_irq80_rearm (
+  GoodixEnrollmentLifecycleAdapter *adapter,
+  const guint8 raw[GOODIX_ENROLLMENT_FDT_TABLE_LENGTH],
+  GoodixEnrollmentPreparedCommand *prepared,
+  GError **error)
+{
+  GoodixEnrollmentCommandMaterial material = {
+    .table_role = GOODIX_ENROLLMENT_TABLE_ROLE_TRANSITION_DOWN,
+    .has_fdt_table = TRUE,
+    .has_timestamp = TRUE,
+  };
+
+  if (adapter == NULL || prepared == NULL || adapter->failed ||
+      adapter->has_cached ||
+      goodix_enrollment_command_plan_get_expected_event (adapter->plan) !=
+        GOODIX_ENROLLMENT_EVENT_IRQ2)
+    return adapter_fail (adapter, GOODIX_ENROLLMENT_ADAPTER_ERROR_STATE,
+                         "IRQ0080 rearm is outside an IRQ2 wait", error);
+  goodix_enrollment_prepared_command_clear (prepared);
+  material.stage_index =
+    adapter->audit->plan.pipeline.protocol.observed_primary_stage_count + 1u;
+  if (!goodix_enrollment_fdt_state_refresh_irq80 (
+        adapter->fdt, raw, material.fdt_table, error))
+    return adapter_fail (adapter, GOODIX_ENROLLMENT_ADAPTER_ERROR_PROTOCOL,
+                         "IRQ0080 DOWN refresh failed", error);
+  prepared->intent = (GoodixEnrollmentCommandIntent) {
+    .event = GOODIX_ENROLLMENT_EVENT_COMMAND_32,
+    .purpose = GOODIX_ENROLLMENT_COMMAND_PURPOSE_IRQ80_REARM,
+    .body_class = GOODIX_ENROLLMENT_BODY_FDT_TIMESTAMP_0801,
+    .stage_index = material.stage_index,
+    .control = 0x32,
+  };
+  adapter->audit->timestamp_request_count++;
+  if (!adapter->timestamp_ready (material.stage_index, prepared->intent.purpose,
+                                 &material.timestamp, adapter->user_data, error))
+    return adapter_fail (adapter, GOODIX_ENROLLMENT_ADAPTER_ERROR_TIMESTAMP,
+                         "IRQ0080 timestamp callback failed", error);
+  if (!goodix_enrollment_command_body_build (
+        &prepared->intent, &material, &prepared->body, NULL, error))
+    return adapter_fail (adapter, GOODIX_ENROLLMENT_ADAPTER_ERROR_PROTOCOL,
+                         "IRQ0080 rearm body construction failed", error);
+  return TRUE;
+}
+
+gboolean
 goodix_enrollment_lifecycle_adapter_prepare (
   GoodixEnrollmentLifecycleAdapter *adapter,
   GoodixEnrollmentPreparedCommand  *prepared,
