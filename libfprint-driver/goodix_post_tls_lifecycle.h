@@ -184,13 +184,6 @@ void goodix_post_tls_lifecycle_cancel (GoodixPostTlsLifecycle *lifecycle,
                                        const gchar *reason);
 /* Explicit host deadline event.  It never retries or reopens the device. */
 void goodix_post_tls_lifecycle_timeout (GoodixPostTlsLifecycle *lifecycle);
-#ifdef GOODIX_ENABLE_TEST_SEAMS
-/* Borrowed actual source; tests may retain it to verify teardown. */
-GSource *goodix_post_tls_lifecycle_test_first_contact_source (
-  GoodixPostTlsLifecycle *lifecycle);
-void goodix_post_tls_lifecycle_test_expire_first_contact (
-  GoodixPostTlsLifecycle *lifecycle);
-#endif
 const gchar *goodix_post_tls_phase_name (GoodixPostTlsPhase phase);
 GoodixPostTlsPhase goodix_post_tls_lifecycle_get_phase (
   const GoodixPostTlsLifecycle *lifecycle);

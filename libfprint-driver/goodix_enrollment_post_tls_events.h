@@ -141,19 +141,6 @@ gboolean goodix_enrollment_post_tls_events_consume_stale_release (
 gboolean goodix_enrollment_post_tls_events_is_failed (
   const GoodixEnrollmentPostTlsEvents *events);
 
-/* The binding owns the one-shot source and cancels it on terminal teardown.
- * Zero means no IRQ0080 exception is waiting for the first real IRQ0002. */
-gint64 goodix_enrollment_post_tls_events_first_contact_deadline (
-  const GoodixEnrollmentPostTlsEvents *events);
-void goodix_enrollment_post_tls_events_clear_first_contact (
-  GoodixEnrollmentPostTlsEvents *events);
-gboolean goodix_enrollment_post_tls_events_expire_first_contact (
-  GoodixEnrollmentPostTlsEvents *events, GError **error);
-#ifdef GOODIX_ENABLE_TEST_SEAMS
-void goodix_enrollment_post_tls_events_test_expire_first_contact (
-  GoodixEnrollmentPostTlsEvents *events);
-#endif
-
 G_END_DECLS
 
 #endif

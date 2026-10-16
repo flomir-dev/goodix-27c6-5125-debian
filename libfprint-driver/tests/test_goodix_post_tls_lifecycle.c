@@ -1694,36 +1694,36 @@ assert_irq80_passive (Fixture *f, guint commands)
 }
 
 static void
+assert_no_contact_sources (GMainContext *context)
+{
+  gint timeout_ms = 0;
+  g_assert_false (g_main_context_prepare (context, NULL));
+  (void) g_main_context_query (context, G_MAXINT, &timeout_ms, NULL, 0);
+  g_assert_cmpint (timeout_ms, ==, -1);
+}
+
+static void
 test_irq80_bounded_and_capture (gconstpointer data)
 {
   gboolean login = GPOINTER_TO_UINT (data) != 0u;
   g_autoptr(GMainContext) context = g_main_context_new ();
   g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
   g_autoptr(GBytes) down = build_event (0x32, 0x0002, 0x003f, 0x0180);
-  g_autoptr(GSource) source = NULL;
   g_main_context_push_thread_default (context);
   Fixture *f = irq80_wait_fixture (login);
   guint commands = f->audit.command_count;
-  gint64 before = g_get_monotonic_time ();
-  feed_frame (f, reverse, 0u);
-  gint64 after = g_get_monotonic_time ();
-  assert_irq80_passive (f, commands);
-  source = g_source_ref (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
-  gint64 deadline = g_source_get_ready_time (source);
-  g_assert_true (g_source_get_context (source) == context);
-  g_assert_cmpint (deadline, >=, before + 5000000);
-  g_assert_cmpint (deadline, <=, after + 5000000);
   feed_frame (f, reverse, 0u);
   assert_irq80_passive (f, commands);
-  g_assert_true (source == goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
-  g_assert_cmpint (g_source_get_ready_time (source), ==, deadline);
+  assert_no_contact_sources (context);
+  feed_frame (f, reverse, 0u);
+  assert_irq80_passive (f, commands);
+  assert_no_contact_sources (context);
   feed_frame (f, down, 0u);
   g_assert_cmpint (goodix_post_tls_lifecycle_get_phase (f->lifecycle), ==,
                    GOODIX_POST_TLS_PHASE_FIRST_22);
   g_assert_cmpuint (f->audit.command_count, ==, commands + 1u);
   g_assert_cmpuint (f->finger_down_count, ==, 1u);
-  g_assert_true (g_source_is_destroyed (source));
-  g_assert_null (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  assert_no_contact_sources (context);
   const guint8 body[] = { 1, 0 };
   complete_command (f, 0x22, body, sizeof body);
   g_autoptr(GBytes) ack22 = build_ack (0x22);
@@ -1745,12 +1745,9 @@ test_irq80_limit (void)
   guint commands = f->audit.command_count;
   feed_frame (f, reverse, 0u);
   feed_frame (f, reverse, 0u);
-  g_autoptr(GSource) source = g_source_ref (
-    goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
   feed_frame (f, reverse, 0u);
   g_assert_cmpuint (f->terminal_count, ==, 1u);
   g_assert_nonnull (strstr (goodix_post_tls_lifecycle_get_error (f->lifecycle)->message, "limit exceeded"));
-  g_assert_true (g_source_is_destroyed (source));
   g_assert_true (goodix_fpi_usb_backend_is_drained (f->backend));
   g_assert_cmpuint (f->audit.command_count, ==, commands);
   g_assert_cmpuint (f->finger_down_count, ==, 0u);
@@ -1761,34 +1758,26 @@ test_irq80_limit (void)
 }
 
 static void
-test_irq80_expiry_and_teardown (gconstpointer data)
+test_irq80_teardown (gconstpointer data)
 {
   const gchar *mode = data;
   g_autoptr(GMainContext) context = g_main_context_new ();
   g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
-  g_autoptr(GSource) source = NULL;
   g_main_context_push_thread_default (context);
   Fixture *f = irq80_wait_fixture (FALSE);
   guint commands = f->audit.command_count;
   feed_frame (f, reverse, 0u);
-  source = g_source_ref (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
-  goodix_post_tls_lifecycle_test_expire_first_contact (f->lifecycle);
-  if (g_str_equal (mode, "silence"))
+  assert_no_contact_sources (context);
+  if (g_str_equal (mode, "cancel"))
     {
       g_autoptr(GError) error = NULL;
       g_assert_true (goodix_fpi_usb_backend_arm_receive (f->backend, f->generation, &error));
-      g_assert_true (g_main_context_iteration (context, FALSE));
-      g_assert_error (goodix_post_tls_lifecycle_get_error (f->lifecycle), G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+      g_assert_cmpuint (goodix_fpi_usb_backend_get_last_in_timeout_ms (f->backend), ==, 0u);
+      goodix_post_tls_lifecycle_cancel (f->lifecycle, "cancel waiting after IRQ0080");
       g_assert_cmpuint (goodix_fpi_usb_backend_get_outstanding (f->backend), ==, 1u);
       goodix_fpi_usb_backend_complete_receive (f->backend, f->generation, NULL, 0u, NULL);
       g_assert_true (goodix_fpi_usb_backend_is_drained (f->backend));
-      goodix_post_tls_lifecycle_cancel (f->lifecycle, "cancel after timeout");
-    }
-  else if (g_str_equal (mode, "late-irq2"))
-    {
-      g_autoptr(GBytes) down = build_event (0x32, 0x0002, 0x003f, 0x0180);
-      feed_frame (f, down, 0u);
-      g_assert_error (goodix_post_tls_lifecycle_get_error (f->lifecycle), G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+      goodix_post_tls_lifecycle_cancel (f->lifecycle, "duplicate cancel");
     }
   else if (g_str_equal (mode, "free"))
     {
@@ -1797,7 +1786,7 @@ test_irq80_expiry_and_teardown (gconstpointer data)
     }
   else
     {
-      goodix_post_tls_lifecycle_cancel (f->lifecycle, "cancel before ready source dispatch");
+      goodix_post_tls_lifecycle_cancel (f->lifecycle, "cancel old generation");
       if (g_str_equal (mode, "generation"))
         {
           goodix_post_tls_lifecycle_free (f->lifecycle);
@@ -1812,7 +1801,7 @@ test_irq80_expiry_and_teardown (gconstpointer data)
           g_assert_nonnull (f->lifecycle);
         }
     }
-  g_assert_true (g_source_is_destroyed (source));
+  assert_no_contact_sources (context);
   g_assert_false (g_main_context_iteration (context, FALSE));
   g_assert_cmpuint (f->terminal_count, ==, g_str_equal (mode, "free") ? 0u : 1u);
   g_assert_cmpuint (f->finger_down_count, ==, 0u);
@@ -1839,8 +1828,6 @@ test_irq80_negative (gconstpointer data)
   if (g_str_equal (mode, "long")) length = 17u;
   g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
   feed_frame (f, reverse, 0u);
-  g_autoptr(GSource) source = g_source_ref (
-    goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
   g_autoptr(GBytes) invalid = build_response (control, body, length);
   if (g_str_equal (mode, "checksum"))
     {
@@ -1853,7 +1840,6 @@ test_irq80_negative (gconstpointer data)
     }
   feed_frame (f, invalid, 0u);
   g_assert_cmpuint (f->terminal_count, ==, 1u);
-  g_assert_true (g_source_is_destroyed (source));
   g_assert_cmpuint (f->image_count, ==, 0u);
   g_assert_cmpuint (f->finger_down_count, ==, 0u);
   g_assert_true (g_queue_is_empty (f->out));
@@ -1894,15 +1880,16 @@ test_irq80_wrong_phase (gconstpointer data)
   g_assert_cmpuint (f->terminal_count, ==, 1u);
   g_assert_cmpuint (f->image_count, ==, images);
   g_assert_cmpuint (f->audit.command_count, ==, commands);
-  g_assert_null (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
   fixture_free (f);
 }
 
 static void
 test_irq80_unauthorized_and_ordinary_wait (void)
 {
+  g_autoptr(GMainContext) context = g_main_context_new ();
+  g_main_context_push_thread_default (context);
   Fixture *f = irq80_wait_fixture (FALSE);
-  g_assert_null (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  assert_no_contact_sources (context);
   goodix_post_tls_lifecycle_timeout (f->lifecycle);
   assert_irq80_passive (f, f->audit.command_count);
   fixture_free (f);
@@ -1913,10 +1900,11 @@ test_irq80_unauthorized_and_ordinary_wait (void)
   g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, 0x0180);
   feed_frame (f, reverse, 0u);
   g_assert_error (goodix_post_tls_lifecycle_get_error (f->lifecycle), G_IO_ERROR, G_IO_ERROR_CANCELLED);
-  g_assert_null (goodix_post_tls_lifecycle_test_first_contact_source (f->lifecycle));
+  assert_no_contact_sources (context);
   g_assert_cmpuint (f->finger_down_count, ==, 0u);
   g_assert_cmpuint (f->terminal_count, ==, 1u);
   fixture_free (f);
+  g_main_context_pop_thread_default (context);
 }
 
 int
@@ -1927,11 +1915,11 @@ main (int argc, char **argv)
   g_test_add_data_func ("/irq80/login-capture", GUINT_TO_POINTER (1u), test_irq80_bounded_and_capture);
   g_test_add_func ("/irq80/third-limit", test_irq80_limit);
   g_test_add_func ("/irq80/unauthorized-and-ordinary-wait", test_irq80_unauthorized_and_ordinary_wait);
-  const gchar *teardown[] = { "silence", "late-irq2", "cancel", "free", "generation" };
+  const gchar *teardown[] = { "cancel", "free", "generation" };
   for (guint i = 0u; i < G_N_ELEMENTS (teardown); i++)
     {
       g_autofree gchar *path = g_strdup_printf ("/irq80/teardown/%s", teardown[i]);
-      g_test_add_data_func (path, teardown[i], test_irq80_expiry_and_teardown);
+      g_test_add_data_func (path, teardown[i], test_irq80_teardown);
     }
   const gchar *negative[] = { "flags", "irq-bits", "control", "short", "long", "checksum" };
   for (guint i = 0u; i < G_N_ELEMENTS (negative); i++)

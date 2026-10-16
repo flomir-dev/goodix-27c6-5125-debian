@@ -2,11 +2,9 @@
 /* Strict inbound-only binding from decrypted post-TLS events to enrollment. */
 #include "goodix_enrollment_post_tls_events.h"
 
-#include <gio/gio.h>
 #include <string.h>
 
-#define GOODIX_FIRST_CONTACT_IRQ80_LIMIT 2u
-#define GOODIX_FIRST_CONTACT_IRQ80_WAIT_US G_GINT64_CONSTANT (5000000)
+#define GOODIX_IRQ80_PER_WAIT_LIMIT 2u
 
 typedef enum
 {
@@ -34,8 +32,7 @@ struct _GoodixEnrollmentPostTlsEvents
   gboolean zero_eligible;
   gboolean zero_enabled;
   GoodixZeroMaskRecoveryAudit zero;
-  guint first_contact_irq80_count;
-  gint64 first_contact_deadline;
+  guint irq80_count;
 };
 
 static void
@@ -70,7 +67,6 @@ events_fail (GoodixEnrollmentPostTlsEvents *events,
   if (events != NULL && !events->failed)
     {
       events->failed = TRUE;
-      events->first_contact_deadline = 0;
       goodix_enrollment_post_tls_events_close_zero_window (events);
       events->audit->failed = TRUE;
       /* A valid unusable contact is not protocol corruption. Keep the
@@ -464,32 +460,23 @@ goodix_enrollment_post_tls_events_handle_a0 (
   events->audit->parsed_a0_count++;
   body = g_bytes_get_data (message.body, &body_length);
 
-  if (events->first_contact_deadline != 0 &&
-      g_get_monotonic_time () >= events->first_contact_deadline)
-    {
-      goodix_a0_message_clear (&message);
-      return goodix_enrollment_post_tls_events_expire_first_contact (events, error);
-    }
-
   if (expected == GOODIX_ENROLLMENT_EVENT_IRQ2 &&
-      events->audit->lifecycle.plan.pipeline.protocol.observed_primary_stage_count == 0u &&
       message.control == 0x32 && body_length == 16u &&
       body[0] == 0x80 && body[1] == 0u && body[2] == 0u && body[3] == 0u)
     {
       goodix_a0_message_clear (&message);
-      if (events->first_contact_irq80_count >= GOODIX_FIRST_CONTACT_IRQ80_LIMIT)
+      if (events->irq80_count >= GOODIX_IRQ80_PER_WAIT_LIMIT)
         {
-          g_message ("GOODIX_IRQ80 path=enrollment event=reject reason=limit count=%u",
-                     events->first_contact_irq80_count);
+          g_message ("GOODIX_IRQ80 path=enrollment event=reject reason=limit count=%u contacts=%u",
+                     events->irq80_count,
+                     events->audit->lifecycle.plan.pipeline.protocol.observed_primary_stage_count);
           return events_fail (events, GOODIX_ENROLLMENT_POST_TLS_ERROR_EVENT,
-                              "Goodix first-contact IRQ0080 limit exceeded", error);
+                              "Goodix enrollment IRQ0080 limit exceeded while waiting for IRQ2", error);
         }
-      events->first_contact_irq80_count++;
-      if (events->first_contact_irq80_count == 1u)
-        events->first_contact_deadline = g_get_monotonic_time () +
-          GOODIX_FIRST_CONTACT_IRQ80_WAIT_US;
-      g_message ("GOODIX_IRQ80 path=enrollment event=absorbed count=%u",
-                 events->first_contact_irq80_count);
+      events->irq80_count++;
+      g_message ("GOODIX_IRQ80 path=enrollment event=absorbed count=%u contacts=%u",
+                 events->irq80_count,
+                 events->audit->lifecycle.plan.pipeline.protocol.observed_primary_stage_count);
       return TRUE;
     }
 
@@ -508,7 +495,6 @@ goodix_enrollment_post_tls_events_handle_a0 (
            parse_irq (&message, 0x32, 0x0002,
                       GOODIX_FDT_FLAGS_FINGER_DOWN, &touch_flags, &raw))
     {
-      events->first_contact_deadline = 0;
       frame_matches_expected = TRUE;
       accepted = goodix_enrollment_lifecycle_adapter_observe (
         events->lifecycle, expected, NULL, 0u, raw, 12u, touch_flags, error);
@@ -523,6 +509,8 @@ goodix_enrollment_post_tls_events_handle_a0 (
             accepted = FALSE;
           else if (events->contact != NULL)
             events->audit->finger_down_delivery_count++;
+          if (accepted)
+            events->irq80_count = 0u;
         }
     }
   else if (expected == GOODIX_ENROLLMENT_EVENT_IRQ0100 &&
@@ -642,43 +630,6 @@ out:
                         error);
   return TRUE;
 }
-
-gint64
-goodix_enrollment_post_tls_events_first_contact_deadline (
-  const GoodixEnrollmentPostTlsEvents *events)
-{
-  return events->first_contact_deadline;
-}
-
-void
-goodix_enrollment_post_tls_events_clear_first_contact (
-  GoodixEnrollmentPostTlsEvents *events)
-{
-  events->first_contact_deadline = 0;
-}
-
-gboolean
-goodix_enrollment_post_tls_events_expire_first_contact (
-  GoodixEnrollmentPostTlsEvents *events, GError **error)
-{
-  g_message ("GOODIX_IRQ80 path=enrollment event=reject reason=timeout count=%u",
-             events->first_contact_irq80_count);
-  (void) events_fail (events, GOODIX_ENROLLMENT_POST_TLS_ERROR_EVENT,
-                     "Goodix first-contact IRQ0080 deadline expired", NULL);
-  g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
-                       "Goodix first-contact IRQ0080 deadline expired");
-  return FALSE;
-}
-
-#ifdef GOODIX_ENABLE_TEST_SEAMS
-void
-goodix_enrollment_post_tls_events_test_expire_first_contact (
-  GoodixEnrollmentPostTlsEvents *events)
-{
-  g_return_if_fail (events->first_contact_deadline != 0);
-  events->first_contact_deadline = g_get_monotonic_time () - 1;
-}
-#endif
 
 gboolean
 goodix_enrollment_post_tls_events_handle_primary_samples (

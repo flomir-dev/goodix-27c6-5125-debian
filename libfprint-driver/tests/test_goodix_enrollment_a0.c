@@ -21,11 +21,9 @@ typedef struct
   guint8 last_out[64];
   guint reject_from_stage;
   guint fail_stage;
-  guint terminal_count;
   guint down_count;
   guint up_count;
-  GError *async_error;
-  gboolean free_on_timeout;
+  gboolean fail_contact;
 } Fixture;
 
 static gboolean
@@ -141,7 +139,6 @@ fixture_clear (Fixture *f)
   goodix_fpi_usb_backend_free (f->backend);
   goodix_usb_router_free (f->router);
   g_object_unref (f->cancellable);
-  g_clear_error (&f->async_error);
 }
 
 static GBytes *
@@ -722,25 +719,14 @@ irq80_contact (guint stage, gboolean present, gpointer data, GError **error)
 {
   Fixture *f = data;
   (void) stage;
-  (void) error;
+  if (present && f->fail_contact)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "synthetic contact rejection");
+      return FALSE;
+    }
   if (present) f->down_count++;
   else f->up_count++;
   return TRUE;
-}
-
-static void
-irq80_terminal (const GError *error, gpointer data)
-{
-  Fixture *f = data;
-  g_assert_null (f->async_error);
-  f->async_error = g_error_copy (error);
-  f->terminal_count++;
-  if (f->free_on_timeout)
-    {
-      goodix_enrollment_fpi_usb_binding_free (f->binding);
-      f->binding = NULL;
-      f->events = NULL;
-    }
 }
 
 static void
@@ -749,7 +735,6 @@ irq80_fixture_init (Fixture *f)
   fixture_init (f);
   g_assert_true (goodix_enrollment_post_tls_events_set_contact_callback (
     f->events, irq80_contact, f, NULL));
-  goodix_enrollment_fpi_usb_binding_set_error_callback (f->binding, irq80_terminal, f);
 }
 
 static void
@@ -769,34 +754,31 @@ assert_irq80_no_progress (Fixture *f)
 }
 
 static void
-test_irq80_capture_and_anchor (void)
+assert_no_contact_sources (GMainContext *context)
+{
+  gint timeout_ms = 0;
+  g_assert_false (g_main_context_prepare (context, NULL));
+  (void) g_main_context_query (context, G_MAXINT, &timeout_ms, NULL, 0);
+  g_assert_cmpint (timeout_ms, ==, -1);
+}
+
+static void
+test_irq80_capture (void)
 {
   g_autoptr(GMainContext) context = g_main_context_new ();
-  g_autoptr(GSource) source = NULL;
   Fixture f;
   g_main_context_push_thread_default (context);
   irq80_fixture_init (&f);
-  g_assert_null (goodix_enrollment_fpi_usb_binding_test_first_contact_source (f.binding));
-  gint64 before = g_get_monotonic_time ();
+  assert_no_contact_sources (context);
   accept_irq (&f, 0x32, 0x0080, 0u);
-  gint64 after = g_get_monotonic_time ();
   assert_irq80_no_progress (&f);
-  source = g_source_ref (goodix_enrollment_fpi_usb_binding_test_first_contact_source (f.binding));
-  gint64 deadline = goodix_enrollment_post_tls_events_first_contact_deadline (f.events);
-  g_assert_cmpint (deadline, >=, before + 5000000);
-  g_assert_cmpint (deadline, <=, after + 5000000);
-  g_assert_cmpint (g_source_get_ready_time (source), ==, deadline);
-  g_assert_true (g_source_get_context (source) == context);
+  assert_no_contact_sources (context);
   g_assert_cmpint (goodix_enrollment_post_tls_events_get_expected_event (f.events), ==, GOODIX_ENROLLMENT_EVENT_IRQ2);
   accept_irq (&f, 0x32, 0x0080, 0u);
   assert_irq80_no_progress (&f);
-  g_assert_true (source == goodix_enrollment_fpi_usb_binding_test_first_contact_source (f.binding));
-  g_assert_cmpint (goodix_enrollment_post_tls_events_first_contact_deadline (f.events), ==, deadline);
-  g_assert_cmpint (g_source_get_ready_time (source), ==, deadline);
+  assert_no_contact_sources (context);
   begin_contact (&f, 1u);
-  g_assert_true (g_source_is_destroyed (source));
-  g_assert_null (goodix_enrollment_fpi_usb_binding_test_first_contact_source (f.binding));
-  g_assert_cmpint (goodix_enrollment_post_tls_events_first_contact_deadline (f.events), ==, 0);
+  assert_no_contact_sources (context);
   g_assert_cmpuint (f.down_count, ==, 1u);
   g_assert_cmpuint (f.audit.primary_b0_count, ==, 1u);
   g_assert_cmpuint (f.audit.lifecycle.plan.pipeline.protocol.observed_primary_stage_count, ==, 1u);
@@ -815,11 +797,8 @@ test_irq80_third_limit (void)
   irq80_fixture_init (&f);
   accept_irq (&f, 0x32, 0x0080, 0u);
   accept_irq (&f, 0x32, 0x0080, 0u);
-  g_autoptr(GSource) source = g_source_ref (
-    goodix_enrollment_fpi_usb_binding_test_first_contact_source (f.binding));
   g_autoptr(GBytes) reverse = irq_frame (0x32, 0x0080, 0u, 16u);
   reject_without_progress (&f, reverse, "limit exceeded", FALSE);
-  g_assert_true (g_source_is_destroyed (source));
   assert_irq80_no_progress (&f);
   g_assert_cmpuint (f.audit.rejected_inbound_count, ==, 1u);
   g_assert_true (goodix_fpi_usb_backend_is_drained (f.backend));
@@ -831,46 +810,23 @@ test_irq80_teardown (gconstpointer data)
 {
   const gchar *mode = data;
   g_autoptr(GMainContext) context = g_main_context_new ();
-  g_autoptr(GSource) source = NULL;
   Fixture f;
   g_main_context_push_thread_default (context);
-  if (g_str_equal (mode, "no-observer")) fixture_init (&f);
-  else irq80_fixture_init (&f);
-  f.free_on_timeout = g_str_equal (mode, "callback-free");
+  irq80_fixture_init (&f);
   accept_irq (&f, 0x32, 0x0080, 0u);
-  if (g_str_equal (mode, "silence-two")) accept_irq (&f, 0x32, 0x0080, 0u);
-  source = g_source_ref (goodix_enrollment_fpi_usb_binding_test_first_contact_source (f.binding));
-  goodix_enrollment_post_tls_events_test_expire_first_contact (f.events);
-  g_source_set_ready_time (source, goodix_enrollment_post_tls_events_first_contact_deadline (f.events));
-  if (g_str_equal (mode, "callback-free") || g_str_equal (mode, "no-observer"))
-    {
-      g_assert_true (g_main_context_iteration (context, FALSE));
-      if (f.binding != NULL)
-        {
-          g_assert_true (goodix_enrollment_fpi_usb_binding_is_failed (f.binding));
-          g_assert_error (goodix_enrollment_fpi_usb_binding_get_error (f.binding), G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
-        }
-    }
-  else if (g_str_has_prefix (mode, "silence"))
+  assert_no_contact_sources (context);
+  if (g_str_equal (mode, "cancel"))
     {
       g_assert_true (goodix_fpi_usb_backend_arm_receive (f.backend, 7u, NULL));
-      g_assert_true (g_main_context_iteration (context, FALSE));
-      g_assert_cmpuint (f.terminal_count, ==, 1u);
-      g_assert_error (f.async_error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
-      g_assert_error (goodix_enrollment_fpi_usb_binding_get_error (f.binding), G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+      g_assert_cmpuint (goodix_fpi_usb_backend_get_last_in_timeout_ms (f.backend), ==, 0u);
+      goodix_enrollment_fpi_usb_binding_cancel (f.binding, "cancel waiting after IRQ0080");
+      g_assert_true (goodix_enrollment_fpi_usb_binding_is_failed (f.binding));
       g_assert_true (g_cancellable_is_cancelled (f.cancellable));
       g_assert_cmpuint (goodix_fpi_usb_backend_get_outstanding (f.backend), ==, 1u);
       goodix_fpi_usb_backend_complete_receive (f.backend, 7u, NULL, 0u, NULL);
       g_assert_true (goodix_fpi_usb_backend_is_drained (f.backend));
-      goodix_enrollment_fpi_usb_binding_cancel (f.binding, "cancel after timeout");
-    }
-  else if (g_str_equal (mode, "late-irq2"))
-    {
-      g_autoptr(GError) error = NULL;
-      g_autoptr(GBytes) down = irq_frame (0x32, 0x0002, 0x002f, 16u);
-      g_assert_false (goodix_enrollment_fpi_usb_binding_handle_a0 (f.binding, down, &error));
-      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
-      g_assert_error (goodix_enrollment_fpi_usb_binding_get_error (f.binding), G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+      goodix_enrollment_fpi_usb_binding_cancel (f.binding, "duplicate cancel");
+      g_assert_cmpuint (f.binding_audit.cancellation_count, ==, 1u);
     }
   else if (g_str_equal (mode, "free"))
     {
@@ -880,7 +836,7 @@ test_irq80_teardown (gconstpointer data)
     }
   else
     {
-      goodix_enrollment_fpi_usb_binding_cancel (f.binding, "cancel before timer dispatch");
+      goodix_enrollment_fpi_usb_binding_cancel (f.binding, "cancel old generation");
       if (g_str_equal (mode, "generation"))
         {
           goodix_enrollment_fpi_usb_binding_free (f.binding);
@@ -897,17 +853,14 @@ test_irq80_teardown (gconstpointer data)
           g_assert_nonnull (f.binding);
         }
     }
-  g_assert_true (g_source_is_destroyed (source));
+  assert_no_contact_sources (context);
   g_assert_false (g_main_context_iteration (context, FALSE));
-  g_assert_cmpuint (f.terminal_count, ==,
-                   (g_str_has_prefix (mode, "silence") || g_str_equal (mode, "callback-free")) ? 1u : 0u);
   assert_irq80_no_progress (&f);
   if (f.binding == NULL)
     {
       goodix_fpi_usb_backend_free (f.backend);
       goodix_usb_router_free (f.router);
       g_object_unref (f.cancellable);
-      g_clear_error (&f.async_error);
     }
   else
     fixture_clear (&f);
@@ -921,8 +874,6 @@ test_irq80_negative (gconstpointer data)
   Fixture f;
   irq80_fixture_init (&f);
   accept_irq (&f, 0x32, 0x0080, 0u);
-  g_autoptr(GSource) source = g_source_ref (
-    goodix_enrollment_fpi_usb_binding_test_first_contact_source (f.binding));
   guint8 control = g_str_equal (mode, "control") ? 0x34 : 0x32;
   guint16 flags = g_str_equal (mode, "flags") ? 1u : 0u;
   guint16 irq = g_str_equal (mode, "irq-bits") ? 0x0082 : 0x0080;
@@ -938,7 +889,6 @@ test_irq80_negative (gconstpointer data)
       invalid = g_bytes_new_take (copy, size);
     }
   reject_without_progress (&f, invalid, NULL, FALSE);
-  g_assert_true (g_source_is_destroyed (source));
   assert_irq80_no_progress (&f);
   fixture_clear (&f);
 }
@@ -954,16 +904,101 @@ test_irq80_wrong_phase (gconstpointer data)
   else
     {
       begin_contact (&f, 1u);
-      if (phase == 2u) finish_contact (&f, 1u, 0x002f);
-    }
-  if (phase == 2u)
-    {
-      g_assert_cmpint (goodix_enrollment_post_tls_events_get_expected_event (f.events), ==, GOODIX_ENROLLMENT_EVENT_IRQ2);
-      g_assert_cmpuint (f.audit.lifecycle.plan.pipeline.protocol.observed_primary_stage_count, ==, 1u);
     }
   g_autoptr(GBytes) reverse = irq_frame (0x32, 0x0080, 0u, 16u);
   reject_without_progress (&f, reverse, NULL, FALSE);
-  g_assert_null (goodix_enrollment_fpi_usb_binding_test_first_contact_source (f.binding));
+  fixture_clear (&f);
+}
+
+static void
+test_irq80_per_wait_quota (gconstpointer data)
+{
+  gboolean exhaust_later = GPOINTER_TO_UINT (data) != 0u;
+  g_autoptr(GMainContext) context = g_main_context_new ();
+  Fixture f;
+  g_main_context_push_thread_default (context);
+  irq80_fixture_init (&f);
+  for (guint stage = 1u; stage <= 8u; stage++)
+    {
+      guint commands[256];
+      memcpy (commands, f.commands, sizeof commands);
+      g_assert_cmpint (goodix_enrollment_post_tls_events_get_expected_event (f.events), ==,
+                       GOODIX_ENROLLMENT_EVENT_IRQ2);
+      for (guint i = 0u; i < 2u; i++)
+        {
+          accept_irq (&f, 0x32, 0x0080, 0u);
+          g_assert_cmpmem (commands, sizeof commands, f.commands, sizeof f.commands);
+          g_assert_cmpuint (f.images, ==, stage - 1u);
+          g_assert_cmpuint (f.down_count, ==, stage - 1u);
+          g_assert_cmpuint (f.up_count, ==, stage - 1u);
+          g_assert_cmpuint (f.audit.irq2_count, ==, stage - 1u);
+          g_assert_cmpuint (f.audit.lifecycle.plan.pipeline.protocol.observed_primary_stage_count, ==, stage - 1u);
+          g_assert_cmpuint (f.audit.lifecycle.plan.pipeline.protocol.completed_stage_count, ==, stage - 1u);
+          assert_no_contact_sources (context);
+        }
+      if (exhaust_later && stage == 3u)
+        {
+          g_autoptr(GBytes) reverse = irq_frame (0x32, 0x0080, 0u, 16u);
+          reject_without_progress (&f, reverse, "limit exceeded", FALSE);
+          g_assert_cmpuint (f.audit.rejected_inbound_count, ==, 1u);
+          g_assert_cmpuint (f.down_count, ==, 2u);
+          g_assert_cmpuint (f.up_count, ==, 2u);
+          g_assert_true (goodix_fpi_usb_backend_is_drained (f.backend));
+          break;
+        }
+      begin_contact (&f, stage);
+      finish_contact (&f, stage, 0x002f);
+      g_assert_cmpuint (f.images, ==, stage);
+      g_assert_cmpuint (f.down_count, ==, stage);
+      g_assert_cmpuint (f.up_count, ==, stage);
+    }
+  if (!exhaust_later)
+    g_assert_true (goodix_enrollment_fpi_usb_binding_is_complete (f.binding));
+  fixture_clear (&f);
+  g_main_context_pop_thread_default (context);
+}
+
+static void
+test_irq80_stale_release_keeps_quota (void)
+{
+  Fixture f;
+  reach_recovery (&f, 2u, 0u);
+  accept_irq (&f, 0x36, 0x0100, 0u);
+  request_sample (&f);
+  ack (&f, 0x32);
+  guint commands[256];
+  memcpy (commands, f.commands, sizeof commands);
+  accept_irq (&f, 0x32, 0x0080, 0u);
+  accept_irq (&f, 0x32, 0x0080, 0u);
+  accept_irq (&f, 0x34, 0x0200, 0u);
+  const GoodixZeroMaskRecoveryAudit *z = goodix_enrollment_fpi_usb_binding_zero_audit (f.binding);
+  g_assert_cmpuint (z->recovered_count, ==, 1u);
+  g_assert_cmpuint (z->late_release_count, ==, 1u);
+  g_assert_cmpmem (commands, sizeof commands, f.commands, sizeof f.commands);
+  g_assert_cmpuint (f.images, ==, 2u);
+  g_assert_cmpuint (f.audit.irq2_count, ==, 2u);
+  g_assert_cmpuint (f.audit.lifecycle.plan.pipeline.protocol.completed_stage_count, ==, 2u);
+  g_autoptr(GBytes) reverse = irq_frame (0x32, 0x0080, 0u, 16u);
+  reject_without_progress (&f, reverse, "limit exceeded", FALSE);
+  g_assert_cmpuint (z->rearm32_count, ==, 1u);
+  g_assert_true (goodix_fpi_usb_backend_is_drained (f.backend));
+  fixture_clear (&f);
+}
+
+static void
+test_irq80_rejected_contact_stays_terminal (void)
+{
+  Fixture f;
+  irq80_fixture_init (&f);
+  accept_irq (&f, 0x32, 0x0080, 0u);
+  accept_irq (&f, 0x32, 0x0080, 0u);
+  f.fail_contact = TRUE;
+  g_autoptr(GBytes) down = irq_frame (0x32, 0x0002, 0x002f, 16u);
+  reject_without_progress (&f, down, "synthetic contact rejection", FALSE);
+  g_assert_cmpuint (f.down_count, ==, 0u);
+  g_assert_cmpuint (f.audit.finger_down_delivery_count, ==, 0u);
+  g_assert_cmpuint (f.audit.lifecycle.plan.pipeline.protocol.observed_primary_stage_count, ==, 0u);
+  g_assert_true (goodix_fpi_usb_backend_is_drained (f.backend));
   fixture_clear (&f);
 }
 
@@ -974,8 +1009,7 @@ test_irq80_ordinary_wait (void)
   Fixture f;
   g_main_context_push_thread_default (context);
   irq80_fixture_init (&f);
-  g_assert_cmpint (goodix_enrollment_post_tls_events_first_contact_deadline (f.events), ==, 0);
-  g_assert_null (goodix_enrollment_fpi_usb_binding_test_first_contact_source (f.binding));
+  assert_no_contact_sources (context);
   g_assert_false (g_main_context_iteration (context, FALSE));
   g_assert_false (goodix_enrollment_fpi_usb_binding_is_failed (f.binding));
   assert_irq80_no_progress (&f);
@@ -992,11 +1026,15 @@ main (int argc, char **argv)
     "control", "irq", "reserved", "body-length", "ack", "checksum", "outer-length"
   };
   g_test_init (&argc, &argv, NULL);
-  g_test_add_func ("/irq80/capture-and-anchor", test_irq80_capture_and_anchor);
+  g_test_add_func ("/irq80/capture", test_irq80_capture);
   g_test_add_func ("/irq80/third-limit", test_irq80_third_limit);
   g_test_add_func ("/irq80/ordinary-wait", test_irq80_ordinary_wait);
+  g_test_add_data_func ("/irq80/quota/every-contact", GUINT_TO_POINTER (0u), test_irq80_per_wait_quota);
+  g_test_add_data_func ("/irq80/quota/third-in-later-wait", GUINT_TO_POINTER (1u), test_irq80_per_wait_quota);
+  g_test_add_func ("/irq80/quota/stale-release-keeps-quota", test_irq80_stale_release_keeps_quota);
+  g_test_add_func ("/irq80/quota/rejected-contact-stays-terminal", test_irq80_rejected_contact_stays_terminal);
   const gchar *irq80_teardown[] = {
-    "silence", "silence-two", "late-irq2", "cancel", "free", "generation", "callback-free", "no-observer"
+    "cancel", "free", "generation"
   };
   for (guint i = 0u; i < G_N_ELEMENTS (irq80_teardown); i++)
     {
@@ -1009,7 +1047,7 @@ main (int argc, char **argv)
       g_autofree gchar *path = g_strdup_printf ("/irq80/reject/%s", irq80_negative[i]);
       g_test_add_data_func (path, irq80_negative[i], test_irq80_negative);
     }
-  for (guint i = 0u; i < 3u; i++)
+  for (guint i = 0u; i < 2u; i++)
     {
       g_autofree gchar *path = g_strdup_printf ("/irq80/wrong-phase/%u", i);
       g_test_add_data_func (path, GUINT_TO_POINTER (i), test_irq80_wrong_phase);
