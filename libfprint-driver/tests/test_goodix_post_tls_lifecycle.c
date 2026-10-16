@@ -1718,13 +1718,13 @@ assert_no_contact_sources (GMainContext *context)
 }
 
 static void
-rearm_irq80 (Fixture *f, guint16 base)
+rearm_irq80_with_flags (Fixture *f, guint16 base, guint16 flags)
 {
   guint8 expected[16] = { 0x08, 0x01 };
   guint commands = f->audit.command_count;
   guint calls = timestamp_calls;
   guint ready = f->login_ready_count;
-  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, 0u, base);
+  g_autoptr(GBytes) reverse = build_event (0x32, 0x0080, flags, base);
   g_autoptr(GBytes) ack = build_ack (0x32);
 
   feed_frame (f, reverse, 0u);
@@ -1753,18 +1753,25 @@ rearm_irq80 (Fixture *f, guint16 base)
 }
 
 static void
+rearm_irq80 (Fixture *f, guint16 base)
+{
+  rearm_irq80_with_flags (f, base, 0u);
+}
+
+static void
 test_irq80_bounded_and_capture (gconstpointer data)
 {
-  gboolean login = GPOINTER_TO_UINT (data) != 0u;
+  gboolean login = (GPOINTER_TO_UINT (data) & 1u) != 0u;
+  guint16 flags = (guint16) (GPOINTER_TO_UINT (data) >> 1);
   g_autoptr(GMainContext) context = g_main_context_new ();
   g_autoptr(GBytes) down = build_event (0x32, 0x0002, 0x003f, 0x0180);
   g_main_context_push_thread_default (context);
   Fixture *f = irq80_wait_fixture (login);
   guint commands = f->audit.command_count;
-  rearm_irq80 (f, 0x8202u);
+  rearm_irq80_with_flags (f, 0x8202u, flags);
   assert_irq80_passive (f, commands + 1u);
   assert_no_contact_sources (context);
-  rearm_irq80 (f, 0x0140u);
+  rearm_irq80_with_flags (f, 0x0140u, flags);
   assert_irq80_passive (f, commands + 2u);
   assert_no_contact_sources (context);
   feed_frame (f, down, 0u);
@@ -1875,7 +1882,8 @@ test_irq80_negative (gconstpointer data)
       body[4u + i * 2u] = 0x80;
       body[5u + i * 2u] = 1u;
     }
-  if (g_str_equal (mode, "flags")) body[2] = 1u;
+  if (g_str_equal (mode, "flags")) body[2] = 0x40;
+  if (g_str_equal (mode, "flags-high")) body[3] = 1u;
   if (g_str_equal (mode, "irq-bits")) body[0] = 0x82;
   if (g_str_equal (mode, "control")) control = 0x34;
   if (g_str_equal (mode, "short")) length = 15u;
@@ -1965,6 +1973,7 @@ test_irq80_invalid_raw (gconstpointer data)
 {
   guint16 bad_word = (guint16) GPOINTER_TO_UINT (data);
   guint8 body[16] = { 0x80, 0, 0, 0 };
+  body[2] = (guint8) (GPOINTER_TO_UINT (data) >> 16);
   Fixture *f = irq80_wait_fixture (FALSE);
   guint commands = f->audit.command_count;
 
@@ -2085,6 +2094,15 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_data_func ("/irq80/capture", GUINT_TO_POINTER (0u), test_irq80_bounded_and_capture);
   g_test_add_data_func ("/irq80/login-capture", GUINT_TO_POINTER (1u), test_irq80_bounded_and_capture);
+  const guint irq80_flags[] = { 0x0001u, 0x0007u, 0x003fu };
+  for (guint i = 0u; i < G_N_ELEMENTS (irq80_flags); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/irq80/flags/%04x", irq80_flags[i]);
+      g_test_add_data_func (path, GUINT_TO_POINTER ((irq80_flags[i] << 1) | 1u),
+                            test_irq80_bounded_and_capture);
+    }
+  g_test_add_data_func ("/irq80/raw/flags7-invalid", GUINT_TO_POINTER (0x000701feu),
+                        test_irq80_invalid_raw);
   g_test_add_func ("/irq80/third-limit", test_irq80_limit);
   g_test_add_func ("/irq80/unauthorized-and-ordinary-wait", test_irq80_unauthorized_and_ordinary_wait);
   g_test_add_func ("/irq80/missing-timestamp", test_irq80_missing_timestamp);
@@ -2107,7 +2125,7 @@ main (int argc, char **argv)
       g_autofree gchar *path = g_strdup_printf ("/irq80/teardown/%s", teardown[i]);
       g_test_add_data_func (path, teardown[i], test_irq80_teardown);
     }
-  const gchar *negative[] = { "flags", "irq-bits", "control", "short", "long", "checksum" };
+  const gchar *negative[] = { "flags", "flags-high", "irq-bits", "control", "short", "long", "checksum" };
   for (guint i = 0u; i < G_N_ELEMENTS (negative); i++)
     {
       g_autofree gchar *path = g_strdup_printf ("/irq80/reject/%s", negative[i]);

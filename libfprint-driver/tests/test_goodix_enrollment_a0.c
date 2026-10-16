@@ -770,14 +770,14 @@ assert_irq80_no_progress (Fixture *f)
 /* The existing completion-gated binding must send exactly one OUT, then wait
  * for its exact ACK before IRQ2. The model itself never observes a command. */
 static void
-rearm_irq80 (Fixture *f)
+rearm_irq80_with_flags (Fixture *f, guint16 flags)
 {
   GoodixEnrollmentModelAudit before = f->audit.lifecycle.plan.pipeline.protocol;
   GoodixEnrollmentPreparedCommand first = { 0 }, cached = { 0 };
   guint commands = f->commands[0x32];
   guint timestamps = f->timestamp_calls;
   guint stage_commands = f->audit.lifecycle.plan.committed_command_count;
-  accept_irq (f, 0x32, 0x0080, 0u);
+  accept_irq (f, 0x32, 0x0080, flags);
   g_assert_cmpuint (f->commands[0x32], ==, commands + 1u);
   g_assert_cmpuint (f->timestamp_calls, ==, timestamps + 1u);
   g_assert_cmpint (f->timestamp_purpose, ==, GOODIX_ENROLLMENT_COMMAND_PURPOSE_IRQ80_REARM);
@@ -815,6 +815,12 @@ rearm_irq80 (Fixture *f)
 }
 
 static void
+rearm_irq80 (Fixture *f)
+{
+  rearm_irq80_with_flags (f, 0u);
+}
+
+static void
 assert_no_contact_sources (GMainContext *context)
 {
   gint timeout_ms = 0;
@@ -824,18 +830,19 @@ assert_no_contact_sources (GMainContext *context)
 }
 
 static void
-test_irq80_capture (void)
+test_irq80_capture (gconstpointer data)
 {
+  guint16 flags = (guint16) GPOINTER_TO_UINT (data);
   g_autoptr(GMainContext) context = g_main_context_new ();
   Fixture f;
   g_main_context_push_thread_default (context);
   irq80_fixture_init (&f);
   assert_no_contact_sources (context);
-  rearm_irq80 (&f);
+  rearm_irq80_with_flags (&f, flags);
   assert_irq80_no_progress (&f);
   assert_no_contact_sources (context);
   g_assert_cmpint (goodix_enrollment_post_tls_events_get_expected_event (f.events), ==, GOODIX_ENROLLMENT_EVENT_IRQ2);
-  rearm_irq80 (&f);
+  rearm_irq80_with_flags (&f, flags);
   assert_irq80_no_progress (&f);
   assert_no_contact_sources (context);
   begin_contact (&f, 1u);
@@ -939,7 +946,8 @@ test_irq80_negative (gconstpointer data)
   irq80_fixture_init (&f);
   rearm_irq80 (&f);
   guint8 control = g_str_equal (mode, "control") ? 0x34 : 0x32;
-  guint16 flags = g_str_equal (mode, "flags") ? 1u : 0u;
+  guint16 flags = g_str_equal (mode, "flags") ? 0x0040u :
+                  (g_str_equal (mode, "flags-high") ? 0x0100u : 0u);
   guint16 irq = g_str_equal (mode, "irq-bits") ? 0x0082 : 0x0080;
   gsize length = g_str_equal (mode, "short") ? 15u : g_str_equal (mode, "long") ? 17u : 16u;
   g_autoptr(GBytes) invalid = irq_frame (control, irq, flags, length);
@@ -1084,9 +1092,11 @@ test_irq80_ordinary_wait (void)
 }
 
 static GBytes *
-irq80_raw_frame (guint16 word)
+irq80_raw_frame (guint16 word, guint16 flags)
 {
   guint8 body[16] = { 0x80 };
+  body[2] = (guint8) flags;
+  body[3] = (guint8) (flags >> 8);
   for (guint i = 0u; i < GOODIX_FDT_CHANNEL_COUNT; i++)
     body[4u + i*2u] = (guint8) (0x88u + i*2u);
   /* Last word ensures an invalid value follows five valid derivations. */
@@ -1099,10 +1109,11 @@ static void
 test_irq80_raw (gconstpointer data)
 {
   guint16 word = (guint16) GPOINTER_TO_UINT (data);
+  guint16 flags = (guint16) (GPOINTER_TO_UINT (data) >> 16);
   guint q = (word >> 1) & 0xffu;
   Fixture f;
   irq80_fixture_init (&f);
-  g_autoptr(GBytes) reverse = irq80_raw_frame (word);
+  g_autoptr(GBytes) reverse = irq80_raw_frame (word, flags);
   if (q == 0u || q == 255u)
     {
       reject_without_progress (&f, reverse, "FDT material is invalid", FALSE);
@@ -1137,7 +1148,7 @@ test_irq80_down_refresh (void)
   memcpy (previous_down, f.last_out + 9u, sizeof previous_down);
   /* High bits deliberately exercise OEM masking; q=0x1a differs from the
    * previous release's q=0x49 for the final channel. */
-  g_autoptr(GBytes) reverse = irq80_raw_frame (0x1234u);
+  g_autoptr(GBytes) reverse = irq80_raw_frame (0x1234u, 0u);
   accept_a0 (&f, reverse);
   g_assert_cmpuint (f.commands[0x32], ==, commands + 1u);
   g_assert_cmpuint (f.timestamp_calls, ==, timestamps + 1u);
@@ -1265,7 +1276,14 @@ main (int argc, char **argv)
     "control", "irq", "reserved", "body-length", "ack", "checksum", "outer-length"
   };
   g_test_init (&argc, &argv, NULL);
-  g_test_add_func ("/irq80/capture", test_irq80_capture);
+  g_test_add_data_func ("/irq80/capture", GUINT_TO_POINTER (0u), test_irq80_capture);
+  const guint irq80_flags[] = { 0x0001u, 0x0007u, 0x003fu };
+  for (guint i = 0u; i < G_N_ELEMENTS (irq80_flags); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/irq80/flags/%04x", irq80_flags[i]);
+      g_test_add_data_func (path, GUINT_TO_POINTER (irq80_flags[i]), test_irq80_capture);
+    }
+  g_test_add_data_func ("/irq80/raw/flags7-invalid", GUINT_TO_POINTER (0x000701feu), test_irq80_raw);
   g_test_add_func ("/irq80/third-limit", test_irq80_third_limit);
   g_test_add_func ("/irq80/ordinary-wait", test_irq80_ordinary_wait);
   g_test_add_func ("/irq80/down-refresh-used-by-next36", test_irq80_down_refresh);
@@ -1299,7 +1317,7 @@ main (int argc, char **argv)
       g_autofree gchar *path = g_strdup_printf ("/irq80/teardown/%s", irq80_teardown[i]);
       g_test_add_data_func (path, irq80_teardown[i], test_irq80_teardown);
     }
-  const gchar *irq80_negative[] = { "flags", "irq-bits", "control", "short", "long", "checksum" };
+  const gchar *irq80_negative[] = { "flags", "flags-high", "irq-bits", "control", "short", "long", "checksum" };
   for (guint i = 0u; i < G_N_ELEMENTS (irq80_negative); i++)
     {
       g_autofree gchar *path = g_strdup_printf ("/irq80/reject/%s", irq80_negative[i]);

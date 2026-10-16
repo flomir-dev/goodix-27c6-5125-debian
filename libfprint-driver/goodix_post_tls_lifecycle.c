@@ -851,7 +851,7 @@ goodix_post_tls_lifecycle_handle_a0 (GoodixPostTlsLifecycle *lifecycle,
       if (lifecycle->phase == GOODIX_POST_TLS_PHASE_FIRST_IRQ2 &&
           message.control == 0x32 &&
           event_fields (&message, &irq, &flags, &raw) &&
-          irq == 0x0080 && flags == 0u)
+          irq == 0x0080 && (flags & (guint16) ~GOODIX_FDT_TOUCH_MASK) == 0u)
         {
           guint8 down[GOODIX_POST_TLS_FDT_TABLE_LENGTH];
 

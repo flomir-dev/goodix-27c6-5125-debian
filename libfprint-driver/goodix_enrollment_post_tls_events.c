@@ -468,7 +468,8 @@ goodix_enrollment_post_tls_events_handle_a0 (
 
   if (expected == GOODIX_ENROLLMENT_EVENT_IRQ2 &&
       message.control == 0x32 && body_length == 16u &&
-      body[0] == 0x80 && body[1] == 0u && body[2] == 0u && body[3] == 0u)
+      body[0] == 0x80 && body[1] == 0u &&
+      (body[2] & (guint8) ~GOODIX_FDT_TOUCH_MASK) == 0u && body[3] == 0u)
     {
       GoodixEnrollmentPreparedCommand rearm = { 0 };
 

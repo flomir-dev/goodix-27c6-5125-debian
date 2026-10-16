@@ -566,7 +566,7 @@ closed. Let `R[i]` be raw channel word `i` and `T[i]` its touch bit:
 | --- | --- | --- |
 | First baseline sample | Control `0x36`, IRQ `0x0100`, touch bits restricted to the six known channels | `table[2i] = 0x80`; `table[2i+1] = (R[i] >> 1) & 0xFF`; components `0x00` and `0xFF` are rejected |
 | Baseline refresh (later samples) | Control `0x36`, IRQ `0x0100`, flags zero | `table[2i] = 0x80`; `table[2i+1] = (R[i] >> 1) & 0xFF`; components `0x00` and `0xFF` are rejected |
-| IRQ0080 DOWN refresh | Control `0x32`, IRQ `0x0080`, flags zero | `table[2i] = 0x80`; `table[2i+1] = (R[i] >> 1) & 0xFF`; components `0x00` and `0xFF` are rejected |
+| IRQ0080 DOWN refresh | Control `0x32`, IRQ `0x0080`, flags restricted to `0x003F` (zero allowed) | `table[2i] = 0x80`; `table[2i+1] = (R[i] >> 1) & 0xFF`; components `0x00` and `0xFF` are rejected |
 | Finger-down up-table | Control `0x32`, IRQ `0x0002`, at least one valid touch bit | `table[2i] = 0x80`; active channel: `table[2i+1] = (R[i] >> 1) + 0x1D`; inactive channel: `0x1B`; overflow is rejected |
 | Release down-table | Control `0x34`, IRQ `0x0200`, flags zero | `table[2i] = 0x80`; `table[2i+1] = R[i] >> 1`; overflow is rejected |
 
@@ -596,11 +596,14 @@ produce the up-table later used by `0x34` in the release path.
 
 For IRQ `0x0080`, the type-12 OEM host refreshes DOWN from the event's own raw
 words and sends another `0x32` with that table and a newly sampled timestamp.
+The OEM IRQ0080 branch does not locally require zero flags. Linux restricts
+the flags to the six-bit mask `0x003F`, including zero, and rejects reserved
+bits; these flags do not turn IRQ0080 into a finger-down event.
 The Linux recovery accepts only a checksum-valid `0x32` event with a 16-byte
-body and zero flags while waiting for the first VERIFY/IDENTIFY contact or an
-enrollment IRQ0002. It validates all six components before updating DOWN,
-preserves the current contact/stage, and requires OUT completion followed by
-ACK32 before accepting IRQ0002. The timestamp keeps the existing Linux
+body and flags within that mask while waiting for the first VERIFY/IDENTIFY
+contact or an enrollment IRQ0002. It validates all six components before
+updating DOWN, preserves the current contact/stage, and requires OUT completion
+followed by ACK32 before accepting IRQ0002. The timestamp keeps the existing Linux
 monotonic-millisecond convention. At most two such events are accepted per
 IRQ0002 wait; a valid contact resets the count. Invalid material fails closed.
 This host sequence does not establish firmware acceptance, and the OEM's ACK
