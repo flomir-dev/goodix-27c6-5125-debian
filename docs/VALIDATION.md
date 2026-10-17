@@ -3,7 +3,7 @@
 
 ## Tested configuration
 
-The hardware evidence concerns one Goodix USB `27c6:5125` reader running
+The Fedora qualification evidence concerns one Goodix USB `27c6:5125` reader running
 `GF_ST411SEC_APP_12509`, on Fedora 44 KDE x86_64 with local accounts. Fedora's
 stock fprintd and authentication consumers are used with the project's libfprint
 runtime and minimal Plasma Login selector. Results below are operator-reported
@@ -15,6 +15,11 @@ tests installation and recovery behavior, not live reader behavior.
 
 Interoperability evidence additionally uses the same reader passed through to a
 Windows 11 virtual machine.
+
+The table below and the installation, lifecycle and biometric measurements that
+follow concern this APP12509 qualification. The driver also recognizes APP12508;
+its separate [contributor evidence](#app12508-contributor-evidence) does not
+extend those results to a second revision or distribution.
 
 | Function | Evidence and boundary |
 | --- | --- |
@@ -45,6 +50,33 @@ Windows 11 virtual machine.
 | Baseline/FDT during live biometrics | Enrollment, verify, identify, NO_MATCH and bounded-failure actions consistently reported `fdt_samples=3`, `fdt_learned_once=1`, `fdt_delta_within=2`, `fdt_delta_outside=0`, `fdt36_submits=3`, `fdt_baseline_b0=1`, `fdt_baseline_decode=1` with `secure_failure=0`. This confirms the bootstrap stayed clean under real biometric use; it is not a new seedless-FDT qualification |
 | Temperature path boundary | The driver defines no Goodix-specific thermal override: it sets no `temp_hot_seconds` and adds no custom thermal branch, so the stock libfprint `FpTemperature` model and its automatic `fpi_device_update_temp()` lifecycle apply unchanged and were exercised through the normal device lifecycle. No synthetic forced-HOT transition was performed, and none is claimed |
 | Cold login | A real cold login succeeded with the fingerprint and no password, with the known readiness delay: after submitting at the greeter, allow roughly one second before contact, because reader preparation starts with the authentication action |
+
+## APP12508 contributor evidence
+
+In [PR #49](https://github.com/sorguido/goodix-27c6-5125/pull/49),
+[@grold](https://github.com/grold) reported successful state-v2 pairing and
+21-sample enrollment on a Huawei MateBook D (BDZ-WXX9), USB `27c6:5125`, running
+`GF_ST411SEC_APP_12508`. The contributor's environment is Ubuntu GNOME, as
+documented in [Issue #51](https://github.com/sorguido/goodix-27c6-5125/issues/51).
+The [follow-up hardware evidence](https://github.com/sorguido/goodix-27c6-5125/pull/49#issuecomment-6229831510)
+includes a non-secret receipt header with `app=APP12508` and sanitized excerpts
+showing successful live VERIFY and multi-finger lock-screen IDENTIFY matches,
+completed preflight and matching secure-session validator checks. These are
+contributor-reported hardware observations, not independent maintainer testing
+of an APP12508 reader.
+
+Integration of PR #49 also passed independent software review, normal and
+sanitized tests, and build/source-hash checks. Separately, the maintainer
+reported a hardware APP12509 regression PASS on a Fedora VM with sensor access.
+These software checks and the APP12509 regression support the integration;
+they do not independently establish APP12508 hardware behavior.
+
+APP12508 recognition therefore has concrete additional hardware evidence, but
+does not qualify Ubuntu/GNOME as a maintainer-supported platform, the full
+Fedora PAM/desktop and installation lifecycle on APP12508, Windows or Windows
+Hello interoperability on that revision, or statistical biometric accuracy.
+The APP12509 measurements, scores and Windows results on this page remain specific to
+their original qualification.
 
 ## Complete installation path
 

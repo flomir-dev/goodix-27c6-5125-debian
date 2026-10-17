@@ -11,8 +11,9 @@ identify → validate → configure for this session → encrypt → calibrate �
 
 This optional appendix opens that box one level further. It follows the
 current implementation for the Goodix `27c6:5125` reader with
-`GF_ST411SEC_APP_12509` firmware. It is a learning aid, not a protocol
-specification or a recipe for other devices.
+`GF_ST411SEC_APP_12509` or `GF_ST411SEC_APP_12508` firmware. Recognition and
+hardware qualification have different [limits](../VALIDATION.md). It is a
+learning aid, not a protocol specification or a recipe for other devices.
 
 > [!IMPORTANT]
 > The descriptions below explain public phase labels, ordering, and checks.
@@ -57,7 +58,7 @@ complete, the current driver follows this order:
 host / driver
     │
     ├─ A2   project re-entry preparation
-    ├─ A8   confirm exact APP12509 target
+    ├─ A8   confirm selected APP12509 or APP12508 target
     ├─ E4   validate expected compatibility binding
     ├─ A2   first known manufacturer cold-start preparation
     ├─ 82   read and check a four-byte target-bound response
@@ -134,8 +135,10 @@ the reader's undocumented internal mechanism is fully known.
 
 ### `A8`: confirm the expected target
 
-`A8` asks for the target identity. The driver accepts only the exact
-`GF_ST411SEC_APP_12509` reply.
+`A8` asks for the target identity. Preflight accepts only the exact
+`GF_ST411SEC_APP_12509` or `GF_ST411SEC_APP_12508` reply, including its
+terminating NUL byte. The later secure-session check must match the same
+revision selected by preflight.
 
 Think of this as checking the model and firmware label before following a
 device-specific instruction book. Continuing with a merely similar reader

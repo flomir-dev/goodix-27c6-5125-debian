@@ -2,20 +2,25 @@
 # Goodix 27c6:5125 for Fedora KDE
 
 Fingerprint driver for the Goodix USB reader `27c6:5125` running
-`GF_ST411SEC_APP_12509`. It connects a Goodix-enabled libfprint library to Fedora's
-fprintd service and desktop authentication, initializing the reader by itself on
-first use while preserving factory firmware and factory data.
+`GF_ST411SEC_APP_12509` or `GF_ST411SEC_APP_12508`. It connects a Goodix-enabled
+libfprint library to Fedora's fprintd service and desktop authentication,
+initializing the reader by itself on first use while preserving factory firmware
+and factory data.
 
 ## Supported configuration
 
 - Fedora 44 KDE, x86_64, with local user accounts.
-- Goodix USB `27c6:5125`, firmware `GF_ST411SEC_APP_12509`.
+- Goodix USB `27c6:5125`, recognized firmware `GF_ST411SEC_APP_12509` and
+  `GF_ST411SEC_APP_12508`.
 - Fedora-provided fprintd, PAM, Plasma Login, KScreenLocker, sudo and PolicyKit.
 
 Within the supported Fedora 44 KDE scope, the project integrates enrollment,
 verification, screen unlocking, ordinary sudo, PolicyKit, Plasma fingerprint
 login and password fallback through Fedora's existing authentication stack.
-Qualification is limited to the documented target and one reader; see
+Fedora qualification concerns one APP12509 reader. APP12508 has contributor-reported
+pairing, enrollment, VERIFY and IDENTIFY evidence on a Huawei MateBook D with
+Ubuntu GNOME; this does not extend the supported Fedora platform to Ubuntu/GNOME
+or qualify the full Fedora authentication path on APP12508. See
 [validation and limitations](docs/VALIDATION.md).
 
 ## Installation

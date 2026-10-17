@@ -7,6 +7,11 @@ The supported path preserves factory firmware, factory data and the reader's
 existing `BB010002` record byte-for-byte. It excludes flashing, IAP, ClearApp,
 OTP writes, factory-data writes, factory key replacement and persistent VID:PID
 or mode changes. Unknown command families and unsafe protocol states fail closed.
+Application discovery accepts only the exact `GF_ST411SEC_APP_12509` and
+`GF_ST411SEC_APP_12508` identities for USB `27c6:5125`. Unknown or malformed
+identities fail closed; pairing activation rejects inconsistent application tags,
+identity bytes or lengths before state reservation or pairing construction. The
+secure session must confirm the selected revision exactly.
 These design constraints do not claim exhaustive factory readback or universal
 Windows compatibility testing.
 

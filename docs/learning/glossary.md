@@ -119,8 +119,9 @@ left. It is separate from capturing the full fingerprint image.
 
 ## Firmware
 
-Software stored inside a hardware device. The target reader reports
-`GF_ST411SEC_APP_12509`; the supported path does not replace it.
+Software stored inside a hardware device. The driver recognizes target readers
+reporting `GF_ST411SEC_APP_12509` or `GF_ST411SEC_APP_12508`; the supported
+path does not replace their firmware.
 
 ## `fprintd`
 

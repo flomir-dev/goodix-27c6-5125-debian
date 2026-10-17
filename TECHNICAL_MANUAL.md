@@ -9,7 +9,7 @@ qualification boundary.
 
 The implementation is intentionally narrow. A successful result on the
 qualified target must not be generalized to a different Goodix reader,
-firmware, distribution, desktop, or authentication policy. Start with
+unlisted firmware, distribution, desktop, or authentication policy. Start with
 [Installation](docs/INSTALLATION.md) for deployment instructions and use this
 manual when reviewing, maintaining, or diagnosing the design.
 
@@ -48,7 +48,8 @@ does not replace Fedora's authentication stack.
 | Dimension | Current boundary |
 | --- | --- |
 | USB identity | Goodix `27c6:5125` |
-| Reader application | `GF_ST411SEC_APP_12509` |
+| Recognized reader applications | `GF_ST411SEC_APP_12509` and `GF_ST411SEC_APP_12508` |
+| Fedora-qualified reader application | `GF_ST411SEC_APP_12509` |
 | Host | Fedora 44 KDE, x86_64 |
 | Accounts | Local accounts |
 | Mandatory access control | SELinux Enforcing |
@@ -58,6 +59,10 @@ does not replace Fedora's authentication stack.
 Other configurations are **not qualified**. That wording means there is not
 enough evidence to claim support; it does not prove that every other
 configuration is incompatible.
+
+Recognition of APP12508 does not establish the full Fedora qualification for
+that revision. Its contributor hardware evidence and limits are described in
+the [validation reference](docs/VALIDATION.md#app12508-contributor-evidence).
 
 ### 1.2 Support boundary
 
@@ -71,8 +76,30 @@ the [validation reference](docs/VALIDATION.md) records the release support basis
 The driver registers only USB vendor/product ID `27c6:5125`; discovery itself is
 based on that ID. Opening the device is inert. A biometric activation claims the
 USB interface and proceeds only after the bounded read-only preflight has
-confirmed the supported `GF_ST411SEC_APP_12509` identity and target binding, and
-has established the host pairing state the secure session will rely on.
+confirmed one of the two exact supported application identities and target
+binding, and has established the host pairing state the secure session will rely
+on.
+
+The preflight `A8` typed response selects the application; USB discovery alone
+does not select a firmware revision:
+
+| Exact device identity | Application tag (`app`) | `identity_length` |
+| --- | --- | ---: |
+| `GF_ST411SEC_APP_12509` | `APP12509` | 22 bytes, including the terminating NUL |
+| `GF_ST411SEC_APP_12508` | `APP12508` | 22 bytes, including the terminating NUL |
+
+Preflight stores the exact bytes in `identity` with their length and application
+tag. Unknown revisions, truncated or oversized responses, and missing or altered
+NUL terminators are rejected. Pairing activation requires `app`, `identity` and
+`identity_length` to agree exactly and checks the buffer bounds before copying;
+missing or inconsistent evidence fails before state reservation or `E0`
+construction. There is no fallback revision for invalid preflight evidence.
+
+The device layer passes the selected tag to the runtime coordinator. Both the
+coordinator and activation boundary bind state-v2 to that tag and supply the
+corresponding exact identity to the secure session. Its subsequent `A8` response
+must match that selected identity byte-for-byte, including length; a different
+allowlisted revision cannot satisfy the check.
 
 Interface 0 supplies the bulk transport used by the implementation:
 
@@ -268,9 +295,14 @@ Three pure, side-effect-free boundaries supply the session inputs:
 
 | Boundary | Input | Output and rejection rule |
 | --- | --- | --- |
-| Pairing crypto | The 32-byte Linux PSK | The 102-byte `BB010003` envelope and its 32-byte `BB020003` SHA-256 validator. Fixed APP12509 profile; no USB or persistence surface |
+| Pairing crypto | The 32-byte Linux PSK | The 102-byte `BB010003` envelope and its 32-byte `BB020003` SHA-256 validator. Fixed profile shared by APP12509 and APP12508; no USB or persistence surface |
 | CONFIG90 derivation | `chip_id` plus a strict 64-byte OTP record | The complete 224-byte ChicagoHS type-12 configuration plus the calibration record it applied. Rejects unknown chip profiles, OTP CRC failures and ambiguous calibration fields |
 | `BB010002` validator | The live 332-byte record | Structural acceptance of the common DPAPI-shaped layout. Treats the protected regions as opaque; neither decrypts nor synthesizes them |
+
+The pairing derivation uses the same fixed producer/KDF key, GCM AAD and
+envelope format for both recognized revisions. Selecting an application identity
+does not select a different cryptographic profile or alter the pairing write,
+readback or TLS proof requirements.
 
 The 224-byte configuration record ends with a little-endian 16-bit finalizer.
 Interpreting the first 222 bytes as 111 little-endian 16-bit words:
@@ -352,6 +384,13 @@ TLS proof. The coordinator itself exposes no pairing write. Ordinary ACTIVE
 reopen uses the journaled Linux PSK with zero E0. Prior-generation and ambiguous
 recovery results fail closed; a proven external replacement is handled only by
 the separately bounded activation graph.
+
+In the legacy material loader, a schema-parsed
+`goodix-5125-device-materials-v1` manifest accepts either full application
+identity and carries that selection into the secure-session material view.
+The separate policy path that pins the manifest by length and digest retains
+its APP12509 identity; it does not infer APP12508 from the manifest. This legacy
+loader is not a prerequisite of the self-contained public installation.
 
 Do not attach the host pairing state directory, its contents, raw USB captures,
 or derived secrets to a bug report.
@@ -474,7 +513,7 @@ The phase contracts are deliberately narrower than informal command names:
 | Phase/control | Known role | Required response contract | Runtime/persistence evidence boundary |
 | --- | --- | --- | --- |
 | Re-entry `A2` | Establish the bounded project re-entry state before identification | ACK plus the target-pinned three-byte typed A2 response | Temporary session preparation; not a USB reset, retry loop, or factory reset |
-| `A8` | Return and confirm the supported application identity | ACK plus exact typed `GF_ST411SEC_APP_12509` response | Read/check only |
+| `A8` | Return and confirm the selected supported application identity | ACK plus the exact typed identity selected by preflight (`GF_ST411SEC_APP_12509` or `GF_ST411SEC_APP_12508`), including its NUL terminator | Read/check only |
 | `E4` | Validate the existing target/pairing compatibility binding | ACK plus the expected typed validator response | Does not expose, replace, or provision the PSK |
 | Cold-start `A2` #1 | First supported sensor-reset step in the known cold-start path | ACK plus the target-pinned three-byte typed A2 response | Exact request resets the sensor side in current evidence; classified as volatile, not absolute NVM readback proof |
 | `0x82` | Read and bind a four-byte target response | ACK plus a four-byte digest-pinned typed response | Read/check; not claimed to be an immutable chip identifier |
@@ -1505,7 +1544,7 @@ threat boundary.
 
 | Limitation | Consequence |
 | --- | --- |
-| One reader/application and Fedora target | No compatibility claim for other Goodix devices, firmware, distributions, desktops, architectures, or multiple readers |
+| Two recognized applications; one Fedora-qualified APP12509 reader | APP12508 has contributor hardware evidence, not the full Fedora qualification. No compatibility claim for other Goodix devices, unlisted firmware, distributions, desktops, architectures, or multiple readers |
 | Local-account qualification only | Network/LDAP/AD account behavior is not established |
 | No FAR/FRR study | Score 40 is not a universal biometric security calibration |
 | Unknown physical DPI/orientation/polarity | Do not label captures 500 DPI or promise a natural-facing or calibrated-polarity raster |
@@ -1521,7 +1560,7 @@ threat boundary.
 | Late IRQ0200 after zero-mask recovery | One release before the valid new IRQ2 is consumed passively; same-byte stale/current release in a later compatible slot is not distinguishable (section 7.4) |
 | Fault/stale-traffic boundary | Process crashes, injected faults, and exhaustive late-byte or cross-generation behavior are outside the qualified scope |
 | SELinux audit suppression is type-based | The known denied read tuple can be hidden even when caused by a future process path |
-| Factory/Windows boundary | Windows coexistence is qualified for a bounded ping-pong on one reader and one VM; there is no exhaustive factory-state readback and no guarantee across other Windows configurations, power-loss scenarios, or future OS updates |
+| Factory/Windows boundary | Windows coexistence is qualified for a bounded ping-pong on one APP12509 reader and one VM; there is no exhaustive factory-state readback and no guarantee across other firmware revisions, Windows configurations, power-loss scenarios, or future OS updates |
 
 See [Validation scope and known limitations](docs/VALIDATION.md) for the release
 support basis. The protocol limits in this manual apply independently of a

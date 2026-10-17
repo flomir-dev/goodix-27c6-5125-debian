@@ -23,8 +23,11 @@ You do not need to read source code. Optional source links are included for
 curious readers, but the story stands on its own.
 
 The project-specific parts describe the supported Goodix USB `27c6:5125` target,
-firmware `GF_ST411SEC_APP_12509`, and Fedora 44 KDE setup. Other Linux systems
-may arrange the upper layers differently.
+recognized firmware `GF_ST411SEC_APP_12509` and `GF_ST411SEC_APP_12508`, and
+Fedora 44 KDE setup. Fedora qualification concerns APP12509; APP12508 has
+separate contributor hardware evidence described in
+[Validation](../VALIDATION.md#app12508-contributor-evidence).
+Other Linux systems may arrange the upper layers differently.
 
 ## The four zoom levels
 

@@ -20,8 +20,8 @@ Before the first image, the driver must:
 2. take temporary ownership of the USB interface;
 3. make sure no stale bytes from an earlier session are being mistaken for a
    new reply;
-4. confirm the expected APP12509 identity and other target-bound replies, and
-   read the factory data this session's configuration is built from;
+4. select the exact APP12509 or APP12508 identity, confirm other target-bound
+   replies, and read the factory data this session's configuration is built from;
 5. on first use only, agree a Linux pairing key and store it with one bounded
    write to the reader;
 6. apply the known runtime configuration for this session;
@@ -33,7 +33,7 @@ Before the first image, the driver must:
 flowchart TD
     A["USB device 27c6:5125 found"] --> C["Claim USB interface"]
     C --> D["Bounded pre-session receive synchronization"]
-    D --> E["Confirm APP12509 identity and target-bound replies"]
+    D --> E["Confirm APP12509 or APP12508 identity and target-bound replies"]
     E --> P["First use only: store one Linux pairing key<br/>with a single bounded write"]
     P --> F["Apply volatile runtime setup"]
     F --> G["TLS 1.2 PSK handshake"]
@@ -168,7 +168,7 @@ labels, followed by a cautious beginner translation:
 | Current phase | Beginner translation |
 | --- | --- |
 | `REENTRY_RECOVERY_A2` | Run one bounded project re-entry step before identification. This label does not mean a factory reset. |
-| `A8` | Require the exact `GF_ST411SEC_APP_12509` identity expected by this driver. |
+| `A8` | Require the exact identity selected by preflight: `GF_ST411SEC_APP_12509` or `GF_ST411SEC_APP_12508`. A different revision, even the other recognized one, cannot substitute for the selected identity. |
 | `E4` | Check the expected validator derived from the stored Linux pairing key. The validator is not the PSK. |
 | `OEM_COLD_START_A2_1` | Perform the first known cold-start preparation step. |
 | `CHIP_82` | Read four target-bound bytes and require their saved data fingerprint (cryptographic digest) to match the recorded expected value. The code does not prove that they are an immutable chip ID. |

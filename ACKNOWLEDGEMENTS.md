@@ -12,6 +12,17 @@ image-processing source described in [Licensing and provenance](docs/LICENSING_A
 The projects remain independently maintained and may differ in scope and
 behavior. Original copyright notices are retained.
 
+## Community contributions
+
+Thank you to [@grold](https://github.com/grold) for two distinct contributions:
+
+- [Issue #51](https://github.com/sorguido/goodix-27c6-5125/issues/51): reporting
+  and analyzing the `IRQ 0x0080` problem when contact begins before or is already
+  present during arming, affecting multi-finger enrollment and lock-screen use.
+- [PR #49](https://github.com/sorguido/goodix-27c6-5125/pull/49): discovering,
+  implementing, testing on real hardware, and sharing support for
+  `GF_ST411SEC_APP_12508` on Goodix USB `27c6:5125`.
+
 ## Development tools
 
 OpenAI AI and Qwen models assisted analysis, implementation, testing, documentation and

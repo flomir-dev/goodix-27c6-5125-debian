@@ -4,8 +4,11 @@
 ## Supported configuration
 
 Fedora 44 KDE on x86_64, a local user account, Goodix USB `27c6:5125` running
-`GF_ST411SEC_APP_12509`, Fedora's stock fprintd, PAM and Plasma Login, and SELinux
-Enforcing. Other hardware, firmware, distributions and network accounts are
+`GF_ST411SEC_APP_12509` or `GF_ST411SEC_APP_12508`, Fedora's stock fprintd, PAM
+and Plasma Login, and SELinux Enforcing. Fedora qualification concerns one
+APP12509 reader; APP12508 recognition is backed by contributor hardware evidence
+on Ubuntu GNOME, not a complete Fedora authentication/lifecycle qualification.
+Other hardware, unlisted firmware, distributions and network accounts are
 unsupported. See [validation](VALIDATION.md) for the qualification boundary.
 
 ## Prerequisites

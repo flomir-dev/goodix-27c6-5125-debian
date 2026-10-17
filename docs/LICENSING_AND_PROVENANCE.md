@@ -24,6 +24,14 @@ change the original copyright or grant of any source file.
 | OpenSSL | Fedora system library | Apache-2.0; TLS dependency |
 | Lifecycle and Plasma selector tools | Project source | GPL-2.0-or-later; ordinary Linux-PAM APIs, Python standard library and Fedora tools |
 
+The APP12509 component labels retain their original profile/provenance names.
+The current driver also recognizes APP12508, propagating its exact identity
+through preflight, host state and secure-session selection. Both revisions use
+the same fixed pairing derivation; no new cryptographic profile or licensing
+boundary is introduced. [PR #49](https://github.com/sorguido/goodix-27c6-5125/pull/49)
+and [acknowledgements](../ACKNOWLEDGEMENTS.md#community-contributions) identify
+@grold's firmware-support contribution.
+
 Fedora supplies fprintd, its PAM module, Plasma, sudo and PolicyKit. Their
 implementations are not copied into private replacement consumers by this
 architecture. Each separately supplied package retains its own license.
@@ -92,8 +100,8 @@ TLS proof. No third-party implementation is copied.
 
 `libfprint-driver/goodix_live_preflight.[ch]` is project-authored from the
 documented APP12509 A0 command/response contracts and reuses the local A0 codec.
-It accepts only the exact application, qualified chip profiles, valid OTP and
-structurally valid live `BB010002`, derives CONFIG90 locally, and contains no
+It accepts only the two exact allowlisted applications, qualified chip profiles,
+valid OTP and structurally valid live `BB010002`, derives CONFIG90 locally, and contains no
 persistent command. `libfprint-driver/goodix_pairing_provision.[ch]` adapts only
 the fixed E0 layout, response contract and one-write guard from the
 project-authored GPL PSK PoC; it therefore retains
