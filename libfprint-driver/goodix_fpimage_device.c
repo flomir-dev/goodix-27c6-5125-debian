@@ -599,7 +599,7 @@ production_live_preflight_acquire_state (
     .vid = 0x27c6u,
     .pid = 0x5125u,
     .chip_id = evidence->chip_id,
-    .app = "APP12509",
+    .app = evidence->app,
     .a2_response = evidence->a2_response,
     .a2_response_length = sizeof evidence->a2_response,
     .chip_response = evidence->chip_response,

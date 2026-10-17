@@ -30,6 +30,8 @@ struct _GoodixTargetMaterial
 {
   GoodixTargetMaterialPolicy policy;
   GoodixTargetMaterialAudit *audit;
+  const guint8 *expected_identity;
+  gsize expected_identity_length;
   guint8 *psk;
   guint8 transport_validator[32];
   guint8 *config90;
@@ -38,6 +40,7 @@ struct _GoodixTargetMaterial
 };
 
 static const guint8 app12509_identity[] = "GF_ST411SEC_APP_12509";
+static const guint8 app12508_identity[] = "GF_ST411SEC_APP_12508";
 
 static GQuark
 goodix_target_material_error_quark (void)
@@ -297,7 +300,9 @@ manifest_parse_string (const gchar **cursor,
 static gboolean
 parse_manifest (const guint8               *bytes,
                 gsize                       length,
-                GoodixTargetMaterialPolicy *policy)
+                GoodixTargetMaterialPolicy *policy,
+                const guint8              **expected_identity,
+                gsize                      *expected_identity_length)
 {
   static const gchar *const keys[] = {
     "schema", "vid", "pid", "app",
@@ -314,7 +319,8 @@ parse_manifest (const guint8               *bytes,
   const gchar *end;
   gboolean ok = FALSE;
 
-  if (bytes == NULL || length == 0u || memchr (bytes, 0, length) != NULL)
+  if (bytes == NULL || length == 0u || memchr (bytes, 0, length) != NULL ||
+      expected_identity == NULL || expected_identity_length == NULL)
     return FALSE;
   cursor = (const gchar *) bytes;
   end = cursor + length;
@@ -368,8 +374,19 @@ parse_manifest (const guint8               *bytes,
       goto out;
   if (g_strcmp0 (values[0], "goodix-5125-device-materials-v1") != 0 ||
       g_strcmp0 (values[1], "27c6") != 0 ||
-      g_strcmp0 (values[2], "5125") != 0 ||
-      g_strcmp0 (values[3], "GF_ST411SEC_APP_12509") != 0)
+      g_strcmp0 (values[2], "5125") != 0)
+    goto out;
+  if (g_strcmp0 (values[3], "GF_ST411SEC_APP_12509") == 0)
+    {
+      *expected_identity = app12509_identity;
+      *expected_identity_length = sizeof app12509_identity;
+    }
+  else if (g_strcmp0 (values[3], "GF_ST411SEC_APP_12508") == 0)
+    {
+      *expected_identity = app12508_identity;
+      *expected_identity_length = sizeof app12508_identity;
+    }
+  else
     goto out;
   for (guint i = 0; i < G_N_ELEMENTS (hash_outputs); i++)
     if (!hex_digest (values[i + 4u], hash_outputs[i]))
@@ -452,10 +469,14 @@ goodix_target_material_load (const gchar                      *manifest_path,
   material = g_new0 (GoodixTargetMaterial, 1);
   material->policy = *policy;
   material->audit = audit;
+  material->expected_identity = app12509_identity;
+  material->expected_identity_length = sizeof app12509_identity;
   if (policy->manifest_length != 0u ?
       (!digest (manifest, manifest_length, actual) ||
        CRYPTO_memcmp (actual, policy->manifest_sha256, 32u) != 0) :
-      !parse_manifest (manifest, manifest_length, &material->policy))
+      !parse_manifest (manifest, manifest_length, &material->policy,
+                       &material->expected_identity,
+                       &material->expected_identity_length))
     {
       g_set_error_literal (error, GOODIX_TARGET_MATERIAL_ERROR,
                            GOODIX_TARGET_MATERIAL_ERROR_CONTENT,
@@ -636,6 +657,8 @@ goodix_target_material_get_secure_session_material (
   GError                     **error)
 {
   if (material == NULL || view == NULL || !material->bound ||
+      material->expected_identity == NULL ||
+      material->expected_identity_length == 0u ||
       material->validator == NULL || material->psk == NULL ||
       material->config90 == NULL)
     {
@@ -645,8 +668,8 @@ goodix_target_material_get_secure_session_material (
       return FALSE;
     }
   memset (view, 0, sizeof *view);
-  view->expected_identity = app12509_identity;
-  view->expected_identity_length = sizeof app12509_identity;
+  view->expected_identity = material->expected_identity;
+  view->expected_identity_length = material->expected_identity_length;
   view->e4_validator = material->validator;
   view->e4_validator_length = 32;
   memcpy (view->e4_validator_sha256,

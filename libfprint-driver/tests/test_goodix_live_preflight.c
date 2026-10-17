@@ -430,6 +430,98 @@ test_unsupported_chip_fails_closed (void)
                    GOODIX_LIVE_PREFLIGHT_TERMINAL);
 }
 
+static void
+test_complete_read_only_graph_app12508 (void)
+{
+  static const guint8 a2[] = { 0x00, 0x00, 0x00 };
+  static const guint8 app[] = "GF_ST411SEC_APP_12508";
+  static const guint8 chip[] = { 0x5a, 0x04, 0x25, 0xa5 };
+  guint8 bb2[GOODIX_BB010002_LENGTH];
+  guint8 validator[32];
+  guint8 otp[GOODIX_CONFIG90_OTP_LENGTH];
+  guint8 e4_bb2[9 + GOODIX_BB010002_LENGTH] = { 0 };
+  guint8 e4_validator[9 + sizeof validator] = { 0 };
+  GoodixLivePreflightAudit audit = { 0 };
+  GoodixLivePreflightEvidence evidence = { 0 };
+  g_autoptr(GoodixLivePreflight) preflight = goodix_live_preflight_new (&audit);
+
+  make_bb010002 (bb2);
+  memset (validator, 0xa5, sizeof validator);
+  make_otp (otp);
+  put_le32 (e4_bb2 + 1, 0xbb010002u);
+  put_le32 (e4_bb2 + 5, sizeof bb2);
+  memcpy (e4_bb2 + 9, bb2, sizeof bb2);
+  put_le32 (e4_validator + 1, 0xbb020003u);
+  put_le32 (e4_validator + 5, sizeof validator);
+  memcpy (e4_validator + 9, validator, sizeof validator);
+
+  complete_phase (preflight, a2, sizeof a2, FALSE);
+  complete_phase (preflight, app, sizeof app, FALSE);
+  complete_phase (preflight, e4_bb2, sizeof e4_bb2, FALSE);
+  complete_phase (preflight, e4_validator, sizeof e4_validator, FALSE);
+  complete_phase (preflight, a2, sizeof a2, FALSE);
+  complete_phase (preflight, chip, sizeof chip, FALSE);
+  complete_phase (preflight, otp, sizeof otp, FALSE);
+
+  g_assert_cmpint (goodix_live_preflight_get_phase (preflight), ==,
+                   GOODIX_LIVE_PREFLIGHT_STOP);
+  g_assert_true (goodix_live_preflight_copy_evidence (preflight, &evidence));
+  g_assert_cmpstr (evidence.app, ==, "APP12508");
+  g_assert_cmpuint (evidence.identity_length, ==, sizeof app);
+  g_assert_cmpmem (evidence.identity, evidence.identity_length,
+                   app, sizeof app);
+  g_assert_true (audit.exact_app);
+  g_assert_true (audit.complete);
+}
+
+static void
+assert_app_identity_rejected (const guint8 *app_payload,
+                              gsize         app_length)
+{
+  static const guint8 a2[] = { 0x00, 0x00, 0x00 };
+  static const guint8 ack_body[] = { 0xa8u, 0x01u };
+  GoodixLivePreflightAudit audit = { 0 };
+  GoodixLivePreflightEvidence evidence = { 0 };
+  g_autoptr(GoodixLivePreflight) preflight = goodix_live_preflight_new (&audit);
+  g_autoptr(GBytes) request = NULL;
+  g_autoptr(GBytes) ack = frame (0xb0u, ack_body, sizeof ack_body);
+  g_autoptr(GBytes) typed = frame (0xa8u, app_payload, app_length);
+  g_autoptr(GError) error = NULL;
+
+  complete_phase (preflight, a2, sizeof a2, FALSE);
+  request = goodix_live_preflight_next_request (preflight, NULL);
+  g_assert_nonnull (request);
+  goodix_live_preflight_out_complete (preflight, NULL);
+  g_assert_true (goodix_live_preflight_handle_a0 (preflight, ack, NULL));
+  g_assert_false (goodix_live_preflight_handle_a0 (preflight, typed, &error));
+  g_assert_nonnull (error);
+  g_assert_cmpint (goodix_live_preflight_get_phase (preflight), ==,
+                   GOODIX_LIVE_PREFLIGHT_TERMINAL);
+  g_assert_false (audit.exact_app);
+  g_assert_false (audit.complete);
+  g_assert_false (goodix_live_preflight_copy_evidence (preflight, &evidence));
+}
+
+static void
+test_unsupported_or_malformed_app_identity_fails_closed (void)
+{
+  static const guint8 unknown_app[] = "GF_ST411SEC_APP_12507";
+  static const guint8 app12508[] = "GF_ST411SEC_APP_12508";
+  static const guint8 oversized_app[] = "GF_ST411SEC_APP_12508_EXTRA";
+  guint8 unterminated[sizeof app12508];
+
+  /* Unknown firmware revision must fail closed. */
+  assert_app_identity_rejected (unknown_app, sizeof unknown_app);
+  /* Truncated identity (missing NUL byte) must fail closed. */
+  assert_app_identity_rejected (app12508, sizeof app12508 - 1u);
+  /* Oversized identity must fail closed. */
+  assert_app_identity_rejected (oversized_app, sizeof oversized_app);
+  /* Exact length but non-NUL trailing byte must fail closed. */
+  memcpy (unterminated, app12508, sizeof unterminated);
+  unterminated[sizeof unterminated - 1u] = 'X';
+  assert_app_identity_rejected (unterminated, sizeof unterminated);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -438,9 +530,13 @@ main (int argc, char **argv)
                    test_a0_multibyte_inner_length_kat);
   g_test_add_func ("/goodix/live-preflight/complete",
                    test_complete_read_only_graph);
+  g_test_add_func ("/goodix/live-preflight/complete-app12508",
+                   test_complete_read_only_graph_app12508);
   g_test_add_func ("/goodix/live-preflight/complete-fragmented",
                    test_complete_read_only_graph_fragmented);
   g_test_add_func ("/goodix/live-preflight/unsupported-chip",
                    test_unsupported_chip_fails_closed);
+  g_test_add_func ("/goodix/live-preflight/unsupported-or-malformed-app",
+                   test_unsupported_or_malformed_app_identity_fails_closed);
   return g_test_run ();
 }

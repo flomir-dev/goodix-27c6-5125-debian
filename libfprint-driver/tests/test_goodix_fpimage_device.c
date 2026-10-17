@@ -1619,6 +1619,27 @@ test_p5_coordinator_active_state (void)
   g_assert_cmpmem (view.psk, view.psk_length, psk, sizeof psk);
   g_assert_cmpmem (view.config90, view.config90_length, config, sizeof config);
   goodix_runtime_coordinator_free (coordinator);
+
+  live.app = "APP12507";
+  coordinator = goodix_runtime_coordinator_acquire (
+    &paths, &policy, &live, coordinator_legacy_acquire,
+    coordinator_legacy_release, &seam, &legacy_audit, &audit, &error);
+  g_assert_null (coordinator);
+  g_assert_nonnull (error);
+  g_clear_error (&error);
+  g_assert_cmpint (audit.decision, ==,
+                   GOODIX_RUNTIME_COORDINATOR_DECISION_FAIL_CLOSED);
+
+  live.app = "";
+  coordinator = goodix_runtime_coordinator_acquire (
+    &paths, &policy, &live, coordinator_legacy_acquire,
+    coordinator_legacy_release, &seam, &legacy_audit, &audit, &error);
+  g_assert_null (coordinator);
+  g_assert_nonnull (error);
+  g_clear_error (&error);
+  g_assert_cmpint (audit.decision, ==,
+                   GOODIX_RUNTIME_COORDINATOR_DECISION_FAIL_CLOSED);
+
   coordinator_remove_directory (state_dir);
   g_assert_cmpint (g_rmdir (root), ==, 0);
 }
