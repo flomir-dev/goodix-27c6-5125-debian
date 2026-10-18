@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Keep the native blank issue available alongside the guided forms.
+blank_issues_enabled: true
