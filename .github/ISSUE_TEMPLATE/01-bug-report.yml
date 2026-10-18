@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name: Bug report
+description: Report a problem or unexpected behavior with the Goodix 27c6:5125 driver
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem with the Goodix USB `27c6:5125` driver.
+
+        Before filing, check the [supported configuration](../../README.md#supported-configuration) and [known limitations](../../docs/VALIDATION.md). Fedora 44 KDE with APP12509 is the qualified target; APP12508 has narrower contributor-reported evidence. Other environments are welcome as reports, but are not automatically supported.
+
+        **Privacy and safety:** Share only relevant, redacted diagnostics. Do not upload pairing keys or state directories, fingerprint templates/images, firmware dumps, raw USB captures, passwords, or other secrets. Do not flash or reset the reader to reproduce a bug.
+
+  - type: input
+    id: version
+    attributes:
+      label: Driver version
+      description: Release tag or commit hash used to build/install the driver
+      placeholder: "e.g. v2.2.1 or commit SHA"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: firmware
+    attributes:
+      label: Reader firmware application
+      description: Select the exact application identity if known
+      options:
+        - GF_ST411SEC_APP_12509
+        - GF_ST411SEC_APP_12508
+        - Other / unknown
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Linux distribution and version
+      placeholder: "e.g. Fedora 44"
+    validations:
+      required: true
+
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop environment
+      placeholder: "e.g. KDE Plasma 6, GNOME, or headless"
+
+  - type: input
+    id: hardware
+    attributes:
+      label: Laptop / host model
+      placeholder: "e.g. Huawei MateBook D 15"
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected feature
+      options:
+        - Installation / update
+        - Fingerprint enrollment
+        - Fingerprint verification / identification
+        - Desktop login / PAM
+        - Screen unlock
+        - sudo / PolicyKit authentication
+        - fprintd / device detection
+        - Windows coexistence
+        - Uninstall / recovery
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: Frequency
+      options:
+        - Always
+        - Sometimes
+        - Rarely
+        - Happened once
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Low (minor issue)
+        - Medium (annoying but usable)
+        - High (blocks fingerprint workflow)
+        - Critical (login or recovery blocked)
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior, including any visible error
+      placeholder: "Describe the problem..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: "What did you expect to happen?"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant redacted logs
+      description: "If available, share a short relevant excerpt from fprintd/journalctl. Redact personal and biometric-derived information; never attach pairing state or raw captures."
+      render: shell
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: "Relevant installation details, safe screenshots, or links to related issues"
