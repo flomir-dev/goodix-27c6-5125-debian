@@ -1,3 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Keep the native blank issue available alongside the guided forms.
+# Keep Blank issue available; route general questions to Discussions.
 blank_issues_enabled: true
+contact_links:
+  - name: Questions & Support
+    url: https://github.com/sorguido/goodix-27c6-5125/discussions
+    about: Please use Discussions for installation help, compatibility questions, and general support
