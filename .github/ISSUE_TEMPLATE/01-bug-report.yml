@@ -9,7 +9,7 @@ body:
       value: |
         Thanks for reporting a problem with the Goodix USB `27c6:5125` driver.
 
-        Before filing, check the [supported configuration](../../README.md#supported-configuration) and [known limitations](../../docs/VALIDATION.md). Fedora 44 KDE with APP12509 is the qualified target; APP12508 has narrower contributor-reported evidence. Other environments are welcome as reports, but are not automatically supported.
+        Before filing, check the [supported configuration](https://github.com/sorguido/goodix-27c6-5125#supported-configuration) and [known limitations](https://github.com/sorguido/goodix-27c6-5125/blob/main/docs/VALIDATION.md). Fedora 44 KDE with APP12509 is the qualified target; APP12508 has narrower contributor-reported evidence. Other environments are welcome as reports, but are not automatically supported.
 
         **Privacy and safety:** Share only relevant, redacted diagnostics. Do not upload pairing keys or state directories, fingerprint templates/images, firmware dumps, raw USB captures, passwords, or other secrets. Do not flash or reset the reader to reproduce a bug.
 
