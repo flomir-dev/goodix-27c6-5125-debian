@@ -1,41 +1,42 @@
-# Portage Ubuntu / Debian — notes de build & état
+# Ubuntu / Debian port — build & status
 
-Portage de `sorguido/goodix-27c6-5125` (Fedora 44 KDE) vers **Ubuntu 26.04**
-(famille Debian, apt). Ce document consigne ce qui fonctionne, comment reproduire,
-et ce qu'il reste à porter.
+Port of `sorguido/goodix-27c6-5125` (Fedora 44 KDE) to **Ubuntu 26.04**
+(Debian family, apt). This document records what works and how to reproduce it.
 
-## Résultat (résumé)
+## Result (summary)
 
-Le **driver C compile, se charge et pilote le capteur** sous Ubuntu 26.04 :
+The driver **builds, loads, pairs the chip and authenticates** on Ubuntu 26.04,
+with **no Windows material and no pairing bundle**. It self-initialises: it
+generates its own PSK and pairs with the sensor on first use, exactly as the
+upstream "first-use" path describes.
 
-| Étape | État |
+| Step | Status |
 |---|---|
-| Compilation `libfprint` + driver `goodix_27c6_5125` | ✅ |
-| Chargement dans `fprintd`, probe du device | ✅ |
-| Ouverture du capteur (`claim` / `open`) | ✅ |
-| Préflight (7 commandes) | ✅ |
-| Démarrage de l'enrôlement | ✅ |
-| Ouverture du répertoire d'état `state-v2` | ✅ (après `mkdir`) |
-| Provisionnement du matériel + appairage (PSK/TLS) | ⛔ bundle requis |
+| Build `libfprint` + `goodix_27c6_5125` driver | ✅ |
+| Load into `fprintd`, device probe | ✅ |
+| Sensor open (`claim` / `open`) | ✅ |
+| Preflight (7 commands) | ✅ |
+| Self-pairing (PSK generated, E0 write, TLS, E4 = MATCH) | ✅ |
+| Enrollment (`fprintd-enroll` → `enroll-completed`) | ✅ |
+| Verification (`fprintd-verify` → `verify-match`) | ✅ |
+| Fingerprint login via PAM (sudo, GDM lock screen) | ✅ |
 
-Seul mur restant : le **bundle de matériel d'appairage** propriétaire, qui s'extrait
-d'une **VM Windows** (passthrough USB + pilote OEM Goodix + contexte DPAPI). C'est une
-contrainte matérielle, pas un problème de code ni de distribution.
+> **The "material bundle" is NOT required.** An earlier version of these notes
+> claimed a Windows-extracted 5-file bundle was mandatory — that was a wrong
+> diagnosis. The driver provisions everything from the reader's own OTP plus a
+> locally generated pairing key. No Windows, no VM, no DPAPI, no USB capture.
 
-## Dépendances de build (Debian/Ubuntu)
-
-Équivalents apt des `BUILD_PACKAGES` Fedora de `production/build-public.py` :
+## Build dependencies (Debian/Ubuntu)
 
 ```bash
-sudo apt install -y gcc g++ meson ninja-build pkg-config \
-  libglib2.0-dev libgusb-dev libssl-dev libopencv-dev libpam0g-dev binutils \
-  libgudev-1.0-dev libnss3-dev
+sudo apt install -y gcc g++ meson ninja-build pkg-config binutils \
+  libglib2.0-dev libgusb-dev libssl-dev libopencv-dev libpam0g-dev \
+  libgudev-1.0-dev libnss3-dev fprintd libpam-fprintd
 ```
 
 | Fedora | Debian/Ubuntu |
 |---|---|
 | `gcc-c++` | `g++` |
-| `ninja-build` | `ninja-build` |
 | `pkgconf-pkg-config` | `pkg-config` |
 | `glib2-devel` | `libglib2.0-dev` |
 | `libgusb-devel` | `libgusb-dev` |
@@ -43,65 +44,67 @@ sudo apt install -y gcc g++ meson ninja-build pkg-config \
 | `opencv-devel` | `libopencv-dev` |
 | `pam-devel` | `libpam0g-dev` |
 
-## Compiler (commande qui fonctionne)
+## Install
 
-Différence clé avec Fedora : `--libdir=lib64` → `--libdir=lib/x86_64-linux-gnu`.
+```bash
+./install-debian.sh
+```
+
+Builds the driver, installs the runtime library under
+`/usr/local/lib/goodix-27c6-5125`, adds an `fprintd` systemd drop-in pointing
+`LD_LIBRARY_PATH` at it, and creates the root-only pairing state directory
+`/var/lib/fprint/goodix-5125-state-v2`. Key difference from Fedora: the meson
+`--libdir` (`lib64` → `lib/x86_64-linux-gnu`).
+
+### Build command (reference)
 
 ```bash
 rm -rf /tmp/goodix-bld
 meson setup /tmp/goodix-bld reference/libfprint-fedora44-1.94.100/source \
   --prefix=/usr --libdir=lib/x86_64-linux-gnu \
   --buildtype=release --wrap-mode=nodownload \
-  -Ddrivers=goodix_27c6_5125 \
-  -Dgoodix_production_minimal=true \
+  -Ddrivers=goodix_27c6_5125 -Dgoodix_production_minimal=true \
   -Dintrospection=false -Ddoc=false -Dinstalled-tests=false \
   -Dudev_rules=disabled -Dudev_hwdb=disabled
 meson compile -C /tmp/goodix-bld fprint-2
 ```
 
-Produit `/tmp/goodix-bld/libfprint/libfprint-2.so.2.0.0` (driver `goodix_27c6_5125`
-intégré ; vérifiable avec `nm … | grep goodix`).
+## Enroll, verify, log in
 
-## Tester sans installer (réversible)
+```bash
+fprintd-enroll          # keep going until "enroll-completed"
+fprintd-verify          # expect "verify-match"
+sudo pam-auth-update    # tick "Fingerprint authentication" for GDM/sudo
+```
+
+> **⚠️ Enroll slowly — this is the one real pitfall.** Press firmly, hold the
+> finger still ~1.5 s per contact, and vary the area (tip / pad / sides / base).
+> A rushed enrollment builds a degenerate template whose SIGFM match score is 0
+> against every sample, so every verify returns `no-match`. A careful ~60–70 s
+> enrollment yields scores well above threshold (e.g. 200–3000 vs 40).
+
+## Debugging
 
 ```bash
 sudo systemctl stop fprintd
 sudo pkill -f /usr/libexec/fprintd
-sudo LD_LIBRARY_PATH=/tmp/goodix-bld/libfprint G_MESSAGES_DEBUG=all /usr/libexec/fprintd -t &
-sleep 2
+sudo LD_LIBRARY_PATH=/usr/local/lib/goodix-27c6-5125 G_MESSAGES_DEBUG=all \
+     /usr/libexec/fprintd -t &
 fprintd-enroll
-# retour à la normale :
-sudo kill %1 ; sudo systemctl start fprintd
+# restore: sudo kill %1 ; sudo systemctl start fprintd
 ```
 
-Comportement observé : le capteur est ouvert, le préflight passe, l'enrôlement démarre,
-puis s'arrête sur le provisionnement de l'état (`state-v2` / `runtime coordinator
-directory policy`) faute de matériel d'appairage.
+Useful audit lines: `GOODIX_PRODUCTION_EPOCH_AUDIT` (look for `pairing_active=1`,
+`tls=1`, `secure_e4_contract=MATCH`) and `GOODIX_SIGFM_MATCH_AUDIT`
+(per-sample `score=` vs `threshold=40`).
 
-## Ce qu'il reste à porter (`deployment/install.py`)
+## Notes on the Fedora installer
 
-Fichier Fedora-spécifique à adapter :
+The upstream `install.sh` / `deployment/install.py` is Fedora-specific
+(`dnf`/`rpm`, SELinux `semanage`/`restorecon`, Plasma Login). On the Debian
+family use `install-debian.sh` instead — the driver itself reads no SELinux
+labels, so no SELinux porting is needed for the self-init path to work.
 
-- Paquets : `rpm -q` / `dnf` → `dpkg -s` / `apt` ; `RUNTIME_PACKAGES` :
-  `fprintd-pam` → `libpam-fprintd`, retirer `policycoreutils-python-utils`.
-- **SELinux** (`semanage`, `semodule`, `restorecon`, type `fprintd_var_lib_t`,
-  xattr `security.selinux`) → neutraliser sous Ubuntu (AppArmor), ces fonctions
-  deviennent des no-op.
-- Chemins : `RUNTIME`/`SUPPORT` en `/usr/local/lib64/` → `/usr/local/lib/`.
-- **Login** : `plasmalogin` (KDE) → GDM/GNOME (`/etc/pam.d/gdm-password`) ou
-  `pam-auth-update`. Fichiers concernés : `deployment/plasma-login-opt-in/`.
-- `host_preflight()` : vérifie l'unité/ExecStart fprintd « Fedora » → chemins Debian
-  (`/usr/libexec/fprintd` est OK sur Ubuntu).
-- Politique du répertoire d'état (`runtime coordinator directory policy`) : reproduire
-  les droits/propriétaire/manifeste attendus lors de la création de
-  `/var/lib/fprint/goodix-5125-state-v2` et `/var/lib/goodix-5125-poc`.
+## License
 
-## Prérequis hors-logiciel (inchangé vs amont)
-
-- Bundle de matériel (5 fichiers : `target-material-manifest.json`,
-  `transport-material.bin`, …) à extraire d'une VM Windows. Sans lui, l'enrôlement
-  ne peut pas aboutir.
-
-## Licence
-
-Dérivé GPL-3.0-or-later. Crédit : `sorguido/goodix-27c6-5125`.
+Derived, GPL-3.0-or-later. Credit: `sorguido/goodix-27c6-5125`.

@@ -39,6 +39,30 @@ available to run the bootstrap block.
 
 After a successful installation, the repository clone may be removed.
 
+## Ubuntu / Debian
+
+This fork adds an Ubuntu/Debian port. On the Debian family, use the dedicated
+installer instead of the Fedora `install.sh`:
+
+```bash
+./install-debian.sh
+```
+
+It builds the driver, wires it into `fprintd`, and creates the pairing state
+directory. The driver then self-initialises on the first fingerprint action —
+**no Windows, no material bundle, no VM.** Then:
+
+```bash
+fprintd-enroll          # enroll SLOWLY (see note) until "enroll-completed"
+fprintd-verify          # expect "verify-match"
+sudo pam-auth-update    # tick "Fingerprint authentication" for GDM/sudo
+```
+
+> **⚠️ Enroll slowly.** Press firmly and hold ~1.5 s per contact, varying the
+> finger area. A rushed enrollment yields a template that matches nothing.
+
+See [BUILD-UBUNTU.md](BUILD-UBUNTU.md) for details, dependencies and debugging.
+
 ## Using fingerprint authentication
 
 The first fingerprint action initializes the reader by itself.
