@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
-# Goodix 27c6:5125 for Fedora KDE
+# Goodix 27c6:5125 for Linux (Fedora KDE & Ubuntu/Debian)
 
 Fingerprint driver for the Goodix USB reader `27c6:5125` running
 `GF_ST411SEC_APP_12509` or `GF_ST411SEC_APP_12508`. It connects a Goodix-enabled
@@ -13,6 +13,7 @@ and factory data.
 - Goodix USB `27c6:5125`, recognized firmware `GF_ST411SEC_APP_12509` and
   `GF_ST411SEC_APP_12508`.
 - Fedora-provided fprintd, PAM, Plasma Login, KScreenLocker, sudo and PolicyKit.
+- **Ubuntu 26.04 / Debian family**, x86_64, via `install-debian.sh` (GNOME/GDM, `pam-auth-update`): self-pairing, enrollment, verification and fingerprint login confirmed on this reader. See [BUILD-UBUNTU.md](BUILD-UBUNTU.md).
 
 Within the supported Fedora 44 KDE scope, the project integrates enrollment,
 verification, screen unlocking, ordinary sudo, PolicyKit, Plasma fingerprint
