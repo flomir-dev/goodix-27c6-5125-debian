@@ -4,6 +4,12 @@ set -uo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
+# Debian/Ubuntu: this is the Fedora installer. Redirect to the native one.
+if command -v apt-get >/dev/null 2>&1 && ! command -v dnf >/dev/null 2>&1; then
+    printf '\nThis is the Fedora installer. On Ubuntu/Debian run instead:\n    ./install-debian.sh\n\n' >&2
+    exit 2
+fi
+
 stop_install() {
     local step="$1"
     local rc="$2"
